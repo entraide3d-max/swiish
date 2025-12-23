@@ -1,0 +1,2949 @@
+require('dotenv').config();
+const express = require('express');
+const path = require('path');
+const cors = require('cors');
+const sqlite3 = require('sqlite3').verbose();
+const multer = require('multer');
+const fs = require('fs');
+const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
+const { body, param, validationResult } = require('express-validator');
+const validator = require('validator');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const csrf = require('csurf');
+// file-type v19 is ESM-only, will use dynamic import when needed
+const QRCode = require('qrcode');
+const bcrypt = require('bcrypt');
+const nodemailer = require('nodemailer');
+const util = require('util');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Short code configuration
+const SHORT_CODE_LENGTH = 7;
+const SHORT_CODE_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+// Logging configuration
+const MAX_LOG_LINES = 1000;
+
+// Simple logging system
+const logFile = path.join(__dirname, 'server.log');
+const maxLogLines = MAX_LOG_LINES; // Keep last MAX_LOG_LINES lines
+let logLines = [];
+
+// Helper function to log with timestamp
+function log(message, data = null) {
+  const timestamp = new Date().toISOString();
+  const logEntry = `[${timestamp}] ${message}${data ? ' ' + JSON.stringify(data, null, 2) : ''}`;
+  // Only log to console in development
+  if (NODE_ENV === 'development') {
+    console.log(logEntry);
+  }
+  logLines.push(logEntry);
+  // Keep only last maxLogLines
+  if (logLines.length > maxLogLines) {
+    logLines = logLines.slice(-maxLogLines);
+  }
+  // Async file write (fire-and-forget)
+  fs.promises.appendFile(logFile, logEntry + '\n', 'utf8').catch(err => {
+    // Silently fail - don't break app if log file write fails
+    console.error('Failed to write to log file:', err.message);
+  });
+}
+
+// Trust proxy for rate limiting behind reverse proxy/load balancer
+app.set('trust proxy', 1);
+
+// Validate required environment variables
+const requiredEnvVars = ['JWT_SECRET', 'ADMIN_PASSWORD'];
+const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+if (missingEnvVars.length > 0) {
+  console.error(`ERROR: Missing required environment variables: ${missingEnvVars.join(', ')}`);
+  console.error('Please set these in your .env file or environment.');
+  process.exit(1);
+}
+
+const JWT_SECRET = process.env.JWT_SECRET;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@localhost';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['http://localhost:3000', 'http://localhost:8095'];
+const NODE_ENV = process.env.NODE_ENV || 'development';
+
+// Email configuration
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT) : 587;
+const SMTP_SECURE = process.env.SMTP_SECURE === 'true';
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASSWORD = process.env.SMTP_PASSWORD;
+const SMTP_FROM = process.env.SMTP_FROM || ADMIN_EMAIL;
+const APP_URL = process.env.APP_URL || (() => {
+  if (NODE_ENV === 'production') {
+    console.error('ERROR: APP_URL must be set in production environment');
+    console.error('Please set APP_URL in your .env file with your actual domain (e.g., https://yourdomain.com)');
+    process.exit(1);
+  }
+  return 'http://localhost:3000';
+})();
+
+// Create email transporter (only if SMTP is configured)
+let emailTransporter = null;
+if (SMTP_HOST && SMTP_USER && SMTP_PASSWORD) {
+  emailTransporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASSWORD
+    }
+  });
+} else if (NODE_ENV === 'development') {
+  // In development, log emails to console instead
+  emailTransporter = {
+    sendMail: async (options) => {
+      console.log('=== EMAIL (Development Mode) ===');
+      console.log('To:', options.to);
+      console.log('Subject:', options.subject);
+      console.log('Text:', options.text);
+      console.log('HTML:', options.html);
+      console.log('===============================');
+      return { messageId: 'dev-' + Date.now() };
+    }
+  };
+} else if (NODE_ENV === 'production') {
+  // Warn in production if SMTP is not configured
+  console.warn('WARNING: SMTP not configured. Email features (invitations, password resets) will not work.');
+  console.warn('Configure SMTP_HOST, SMTP_USER, and SMTP_PASSWORD in your .env file to enable email features.');
+}
+
+// --- 1. SETUP DIRECTORIES ---
+const DATA_DIR = path.join(__dirname, 'data');
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+// --- 2. SETUP DATABASE (SQLite) ---
+const db = new sqlite3.Database(path.join(DATA_DIR, 'cards.db'));
+
+// Promisified database methods for async/await error handling
+const dbRun = util.promisify(db.run.bind(db));
+const dbGet = util.promisify(db.get.bind(db));
+
+
+// Helper function to get default theme colours
+const getDefaultThemeColors = () => [
+  { name: "indigo", gradient: "from-indigo-600 to-purple-600", button: "bg-indigo-600 hover:bg-indigo-700", link: "text-indigo-600 bg-indigo-50 border-indigo-100 hover:bg-indigo-100", text: "text-indigo-600" },
+  { name: "blue", gradient: "from-blue-600 to-cyan-600", button: "bg-blue-600 hover:bg-blue-700", link: "text-blue-600 bg-blue-50 border-blue-100 hover:bg-blue-100", text: "text-blue-600" },
+  { name: "rose", gradient: "from-rose-500 to-orange-500", button: "bg-rose-600 hover:bg-rose-700", link: "text-rose-600 bg-rose-50 border-rose-100 hover:bg-rose-100", text: "text-rose-600" },
+  { name: "emerald", gradient: "from-emerald-500 to-teal-500", button: "bg-emerald-600 hover:bg-emerald-700", link: "text-emerald-600 bg-emerald-50 border-emerald-100 hover:bg-emerald-100", text: "text-emerald-600" },
+  { name: "slate", gradient: "from-slate-700 to-slate-900", button: "bg-slate-800 hover:bg-slate-900", link: "text-slate-700 bg-slate-100 border-slate-200 hover:bg-slate-200", text: "text-slate-800" }
+];
+
+// Initialize database schema
+db.serialize(() => {
+  // Create new multi-tenant tables
+  db.run(`
+    CREATE TABLE IF NOT EXISTS organisations (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT UNIQUE,
+      subscription_tier TEXT DEFAULT 'individual',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      organisation_id TEXT,
+      role TEXT DEFAULT 'member',
+      email_verified INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (organisation_id) REFERENCES organisations(id) ON DELETE SET NULL
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS organisation_settings (
+      organisation_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (organisation_id, key),
+      FOREIGN KEY (organisation_id) REFERENCES organisations(id) ON DELETE CASCADE
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS user_settings (
+      user_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, key),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS invitations (
+      id TEXT PRIMARY KEY,
+      organisation_id TEXT NOT NULL,
+      email TEXT NOT NULL,
+      token TEXT UNIQUE NOT NULL,
+      role TEXT DEFAULT 'member',
+      invited_by TEXT NOT NULL,
+      expires_at DATETIME NOT NULL,
+      accepted_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (organisation_id) REFERENCES organisations(id) ON DELETE CASCADE,
+      FOREIGN KEY (invited_by) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      token TEXT UNIQUE NOT NULL,
+      expires_at DATETIME NOT NULL,
+      used_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS email_verification_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      token TEXT UNIQUE NOT NULL,
+      expires_at DATETIME NOT NULL,
+      verified_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+  
+  // Create cards table (fresh install only - no migration)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS cards (
+      slug TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      short_code TEXT NOT NULL,
+      data TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (slug, user_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+  
+  // Create unique index on short_code
+  db.run(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_short_code ON cards(short_code)
+  `);
+  
+  // Migration: Backfill short codes for existing cards that don't have them
+  db.all("SELECT slug, user_id FROM cards WHERE short_code IS NULL OR short_code = ''", [], (err, rows) => {
+    if (err) {
+      console.error('Error checking for cards without short codes:', err);
+      return;
+    }
+    if (rows && rows.length > 0) {
+      log(`Found ${rows.length} cards without short codes, generating...`);
+      let processed = 0;
+      rows.forEach(row => {
+        ensureUniqueShortCode(db, (err, shortCode) => {
+          if (err) {
+            console.error('Error generating short code:', err);
+            return;
+          }
+          db.run("UPDATE cards SET short_code = ? WHERE slug = ? AND user_id = ?", 
+            [shortCode, row.slug, row.user_id], 
+            (err) => {
+              if (err) {
+                console.error('Error updating card with short code:', err);
+              } else {
+                processed++;
+                if (processed === rows.length) {
+                  log(`Successfully backfilled ${processed} cards with short codes`);
+                }
+              }
+            }
+          );
+        });
+      });
+    }
+  });
+});
+
+// --- 3. SETUP UPLOADS (Multer) ---
+const { randomUUID } = require('crypto');
+const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+const ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 5 * 1024 * 1024; // 5MB default
+
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, UPLOADS_DIR);
+  },
+  filename: function (req, file, cb) {
+    // Use UUID for filename to prevent path traversal and collisions
+    const ext = path.extname(file.originalname).toLowerCase();
+    // Sanitize extension - only allow whitelisted extensions
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
+      return cb(new Error('Invalid file type'));
+    }
+    cb(null, randomUUID() + ext);
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: MAX_FILE_SIZE },
+  fileFilter: (req, file, cb) => {
+    // Basic MIME type check (will be validated again after upload)
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
+      return cb(new Error('Invalid file extension'));
+    }
+    cb(null, true);
+  }
+});
+
+// --- MIDDLEWARE ---
+
+// Generate nonce middleware (must be BEFORE helmet for CSP)
+app.use((req, res, next) => {
+  // Generate cryptographically random nonce for each request
+  const nonce = require('crypto').randomBytes(16).toString('base64');
+  res.locals.nonce = nonce;
+  next();
+});
+
+// Security headers
+app.use(helmet({
+  contentSecurityPolicy: (req, res) => ({
+    directives: {
+      defaultSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      // Use nonces for inline scripts instead of unsafe-inline
+      scriptSrc: [
+        "'self'",
+        `'nonce-${res.locals.nonce}'`
+      ],
+      styleSrc: ["'self'", "'unsafe-inline'"], // Keep for CSS (less critical)
+      fontSrc: ["'self'", "data:"],
+      // Allow debug logging endpoint in development only (for development debugging)
+      connectSrc: NODE_ENV === 'development' 
+        ? ["'self'", "http://127.0.0.1:7243", "http://localhost:7243"]
+        : ["'self'"]
+    }
+  }),
+  crossOriginEmbedderPolicy: false
+}));
+
+// CORS configuration
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, Postman, etc.) in development
+    if (!origin && NODE_ENV === 'development') {
+      return callback(null, true);
+    }
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token']
+}));
+
+// Body parsing
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(cookieParser());
+
+// Rate limiting
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 attempts per window
+  message: 'Too many login attempts, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per window
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10, // 10 uploads per hour
+  message: 'Too many upload attempts, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// CSRF protection (skip for GET requests and public endpoints)
+const csrfProtection = csrf({ 
+  cookie: {
+    httpOnly: true,
+    secure: NODE_ENV === 'production',
+    sameSite: 'strict'
+  }
+});
+
+// HTTPS enforcement (if not behind reverse proxy)
+if (NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    // Check if request is already secure (via reverse proxy)
+    if (req.headers['x-forwarded-proto'] === 'https' || req.secure) {
+      return next();
+    }
+    // Only redirect if explicitly configured
+    if (process.env.FORCE_HTTPS === 'true') {
+      return res.redirect(301, `https://${req.headers.host}${req.url}`);
+    }
+    next();
+  });
+}
+
+// Serve the React App Build
+app.use(express.static(path.join(__dirname, 'build'), {
+  maxAge: '1d', // Cache static assets for 1 day
+  etag: true,
+  lastModified: true,
+  index: false // Don't automatically serve index.html - let SPA fallback handle it
+}));
+// Serve Uploaded Images publicly
+app.use('/uploads', express.static(UPLOADS_DIR));
+
+// --- AUTHENTICATION MIDDLEWARE ---
+
+// JWT Authentication middleware
+const requireAuth = (req, res, next) => {
+  const token = req.cookies.authToken || (req.headers.authorization && req.headers.authorization.replace('Bearer ', ''));
+  
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    // Support both old format (admin: true) and new format (user_id, organisation_id, role)
+    if (decoded.user_id) {
+      req.user = {
+        id: decoded.user_id,
+        organisationId: decoded.organisation_id || null,
+        role: decoded.role || 'member'
+      };
+    } else if (decoded.admin) {
+      // Backward compatibility: if old JWT format, treat as admin
+      // This allows old tokens to still work during transition
+      req.user = {
+        id: null,
+        organisationId: null,
+        role: 'admin'
+      };
+    } else {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+};
+
+// Role-based access control middleware
+const requireRole = (...allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient permissions' });
+    }
+    
+    next();
+  };
+};
+
+// Error handling middleware
+const errorHandler = (err, req, res, next) => {
+  console.error('Error:', err);
+  
+  // Don't leak error details in production
+  if (NODE_ENV === 'production') {
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ error: 'Invalid input' });
+    }
+    if (err.name === 'UnauthorizedError' || err.name === 'JsonWebTokenError') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+  
+  // In development, show more details
+  res.status(err.status || 500).json({ 
+    error: err.message || 'Internal server error',
+    stack: err.stack 
+  });
+};
+
+// Validation error handler
+const handleValidationErrors = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    // Return the first error message in a user-friendly format
+    const firstError = errors.array()[0];
+    let errorMessage = firstError.msg;
+    
+    // Make error messages more specific
+    if (firstError.param === 'password' && firstError.msg.includes('length')) {
+      errorMessage = 'Password must be at least 8 characters long';
+    } else if (firstError.param === 'email') {
+      errorMessage = 'Please enter a valid email address';
+    } else if (firstError.param === 'role') {
+      errorMessage = 'Role must be either "owner" or "member"';
+    }
+    
+    return res.status(400).json({ 
+      error: errorMessage,
+      details: NODE_ENV === 'development' ? errors.array() : undefined
+    });
+  }
+  next();
+};
+
+// --- API ROUTES ---
+
+// CSRF token endpoint (public, before auth)
+app.get('/api/csrf-token', csrfProtection, (req, res) => {
+  res.json({ csrfToken: req.csrfToken() });
+});
+
+// Setup endpoints (public, only work if no users exist)
+app.get('/api/setup/status', apiLimiter, (req, res, next) => {
+  db.get("SELECT COUNT(*) as count FROM users", [], (err, row) => {
+    if (err) return next(err);
+    res.json({ 
+      setupComplete: row.count > 0,
+      userCount: row.count 
+    });
+  });
+});
+
+app.post('/api/setup/initialize', apiLimiter, csrfProtection, [
+  body('organisationName').trim().isLength({ min: 1, max: 200 }).withMessage('Organisation name is required and must be less than 200 characters'),
+  body('adminEmail').isEmail({ allow_display_name: false, require_tld: false }).withMessage('Valid email required'),
+  body('adminPassword').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
+], handleValidationErrors, async (req, res, next) => {
+  // Only allow setup if no users exist
+  db.get("SELECT COUNT(*) as count FROM users", [], async (err, row) => {
+    if (err) return next(err);
+    if (row.count > 0) {
+      return res.status(403).json({ error: 'Setup already completed' });
+    }
+    
+    const { organisationName, adminEmail, adminPassword } = req.body;
+    
+    // Generate organisation slug from name
+    const orgSlug = organisationName.toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'organisation';
+    
+    // Find available slug (shouldn't be needed on fresh install, but be safe)
+    const findAvailableSlug = (slug, counter = 0) => {
+      const finalSlug = counter === 0 ? slug : `${orgSlug}-${counter}`;
+      db.get("SELECT id FROM organisations WHERE slug = ?", [finalSlug], (err, existingOrg) => {
+        if (err) return next(err);
+        if (existingOrg) {
+          findAvailableSlug(slug, counter + 1);
+        } else {
+          createOrgAndUser(finalSlug);
+        }
+      });
+    };
+    
+    findAvailableSlug(orgSlug);
+    
+    async function createOrgAndUser(slug) {
+      const orgId = require('crypto').randomUUID();
+      const userId = require('crypto').randomUUID();
+      
+      try {
+        const passwordHash = await bcrypt.hash(adminPassword, 10);
+        
+        // Create organisation
+        db.run(`
+          INSERT INTO organisations (id, name, slug, subscription_tier)
+          VALUES (?, ?, ?, ?)
+        `, [orgId, organisationName, slug, 'individual'], (err) => {
+          if (err) return next(err);
+          
+          // Create admin user
+          db.run(`
+            INSERT INTO users (id, email, password_hash, organisation_id, role, email_verified)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `, [userId, adminEmail.toLowerCase(), passwordHash, orgId, 'owner', 0], async (err) => {
+            if (err) return next(err);
+            
+            // Initialize default organisation settings
+            const defaultColors = getDefaultThemeColors();
+            try {
+              await dbRun("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'default_organisation', organisationName]);
+              await dbRun("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'theme_colors', JSON.stringify(defaultColors)]);
+              await dbRun("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'allow_theme_customisation', 'true']);
+              await dbRun("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'allow_image_customisation', 'true']);
+              await dbRun("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'allow_links_customisation', 'true']);
+              await dbRun("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'allow_privacy_customisation', 'true']);
+            } catch (err) {
+              return next(err);
+            }
+            
+            // Generate JWT token
+            const token = jwt.sign(
+              {
+                user_id: userId,
+                organisation_id: orgId,
+                role: 'owner'
+              },
+              JWT_SECRET,
+              { expiresIn: JWT_EXPIRES_IN }
+            );
+            
+            // Set httpOnly cookie
+            res.cookie('authToken', token, {
+              httpOnly: true,
+              secure: NODE_ENV === 'production',
+              sameSite: 'strict',
+              maxAge: 24 * 60 * 60 * 1000 // 24 hours
+            });
+            
+            res.json({ success: true, userId, email: adminEmail.toLowerCase(), role: 'owner' });
+          });
+        });
+      } catch (err) {
+        return next(err);
+      }
+    }
+  });
+});
+
+// Login
+app.post('/api/login', loginLimiter, [
+  body('email').custom((value) => {
+    // Allow localhost emails for development
+    if (value && (validator.isEmail(value) || /^[^\s@]+@localhost(\.[^\s@]+)?$/.test(value))) {
+      return true;
+    }
+    throw new Error('Valid email required');
+  }),
+  body('password').notEmpty().withMessage('Password is required')
+], handleValidationErrors, async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+    
+    // Look up user by email
+    db.get("SELECT id, email, password_hash, organisation_id, role FROM users WHERE email = ?", [email.toLowerCase()], async (err, user) => {
+      if (err) {
+        return next(err);
+      }
+      
+      // If no user found, check if we should create default user (backward compatibility)
+      if (!user) {
+        // Check if any users exist
+        db.get("SELECT COUNT(*) as count FROM users", [], async (err, countRow) => {
+          if (err) {
+            return next(err);
+          }
+          
+          // If no users exist and ADMIN_PASSWORD matches, create default user
+          if (countRow.count === 0 && password === ADMIN_PASSWORD) {
+            // Check if default organisation already exists
+            db.get("SELECT id FROM organisations WHERE slug = 'default'", [], (err, existingOrg) => {
+              if (err) {
+                return next(err);
+              }
+              
+              let orgId;
+              if (existingOrg) {
+                // Organisation already exists
+                orgId = existingOrg.id;
+                createLoginUser(orgId);
+              } else {
+                // Create default organisation
+                orgId = require('crypto').randomUUID();
+                const orgName = ADMIN_EMAIL.split('@')[1] ? `Default Organisation (${ADMIN_EMAIL.split('@')[1]})` : 'Default Organisation';
+                
+                db.run(`
+                  INSERT INTO organisations (id, name, slug, subscription_tier)
+                  VALUES (?, ?, ?, ?)
+                `, [orgId, orgName, 'default', 'individual'], (err) => {
+                  if (err) {
+                    return next(err);
+                  }
+                  createLoginUser(orgId);
+                });
+              }
+              
+              function createLoginUser(orgId) {
+                // Create default admin user
+                const userId = require('crypto').randomUUID();
+                bcrypt.hash(ADMIN_PASSWORD, 10, (err, passwordHash) => {
+                  if (err) {
+                    return next(err);
+                  }
+                  
+                  db.run(`
+                    INSERT INTO users (id, email, password_hash, organisation_id, role, email_verified)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                  `, [userId, ADMIN_EMAIL, passwordHash, orgId, 'owner', 0], (err) => {
+                    if (err) {
+                      return next(err);
+                    }
+                    
+                    // Initialize default organisation settings if they don't exist
+                    db.get("SELECT COUNT(*) as count FROM organisation_settings WHERE organisation_id = ?", [orgId], (err, settingsCount) => {
+                      if (!err && settingsCount.count === 0) {
+                        const defaultColors = getDefaultThemeColors();
+                        db.run("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'default_organisation', 'My Organisation']);
+                        db.run("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'theme_colors', JSON.stringify(defaultColors)]);
+                        // Initialize override toggles (all default to true - allow customisation)
+                        db.run("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'allow_theme_customisation', 'true']);
+                        db.run("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'allow_image_customisation', 'true']);
+                        db.run("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'allow_links_customisation', 'true']);
+                        db.run("INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", [orgId, 'allow_privacy_customisation', 'true']);
+                      }
+                      
+                      // Generate JWT token for new user
+                      const token = jwt.sign(
+                        {
+                          user_id: userId,
+                          organisation_id: orgId,
+                          role: 'owner'
+                        },
+                        JWT_SECRET,
+                        { expiresIn: JWT_EXPIRES_IN }
+                      );
+                      
+                      // Set httpOnly cookie
+                      res.cookie('authToken', token, {
+                        httpOnly: true,
+                        secure: NODE_ENV === 'production',
+                        sameSite: 'strict',
+                        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+                      });
+                      
+                      res.json({ success: true });
+                    });
+                  });
+                });
+              }
+            });
+          } else {
+            return res.status(401).json({ error: 'Invalid email or password' });
+          }
+        });
+        return;
+      }
+      
+      // Verify password
+      const passwordMatch = await bcrypt.compare(password, user.password_hash);
+      if (!passwordMatch) {
+        return res.status(401).json({ error: 'Invalid email or password' });
+      }
+      
+      // Generate JWT token
+      const token = jwt.sign(
+        {
+          user_id: user.id,
+          organisation_id: user.organisation_id,
+          role: user.role
+        },
+        JWT_SECRET,
+        { expiresIn: JWT_EXPIRES_IN }
+      );
+      
+      // Set httpOnly cookie
+      res.cookie('authToken', token, {
+        httpOnly: true,
+        secure: NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+      });
+      
+      res.json({ success: true });
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Logout
+app.post('/api/logout', (req, res) => {
+  res.clearCookie('authToken');
+  res.json({ success: true });
+});
+
+// Image Upload Endpoint
+app.post('/api/upload', requireAuth, uploadLimiter, csrfProtection, upload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Validate file type by reading actual file content
+    const filePath = req.file.path;
+    // Dynamic import for ESM-only file-type package
+    const { fileTypeFromFile } = await import('file-type');
+    const fileType = await fileTypeFromFile(filePath);
+    
+    if (!fileType || !ALLOWED_MIME_TYPES.includes(fileType.mime)) {
+      // Delete the uploaded file if it's not valid
+      try {
+        await fs.promises.unlink(filePath);
+      } catch (unlinkErr) {
+        // Log but don't fail the request if cleanup fails
+        log('Failed to delete invalid file:', unlinkErr.message);
+      }
+      return res.status(400).json({ error: 'Invalid file type. Only images are allowed.' });
+    }
+
+    // Verify extension matches MIME type
+    const ext = path.extname(req.file.filename).toLowerCase();
+    const expectedExt = {
+      'image/jpeg': '.jpg',
+      'image/png': '.png',
+      'image/webp': '.webp',
+      'image/gif': '.gif'
+    };
+    
+    if (expectedExt[fileType.mime] !== ext) {
+      try {
+        await fs.promises.unlink(filePath);
+      } catch (unlinkErr) {
+        // Log but don't fail the request if cleanup fails
+        log('Failed to delete invalid file:', unlinkErr.message);
+      }
+      return res.status(400).json({ error: 'File extension does not match file type' });
+    }
+
+    // Return the public URL
+    res.json({ url: `/uploads/${req.file.filename}` });
+  } catch (err) {
+    // Clean up file if error occurred
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      try {
+        await fs.promises.unlink(req.file.path);
+      } catch (unlinkErr) {
+        // Log but don't fail the request if cleanup fails
+        log('Failed to delete file on error:', unlinkErr.message);
+      }
+    }
+    next(err);
+  }
+});
+
+// GET Current User Info
+app.get('/api/auth/me', requireAuth, apiLimiter, (req, res, next) => {
+  if (!req.user.id) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  db.get("SELECT id, email, organisation_id, role, email_verified FROM users WHERE id = ?", [req.user.id], (err, user) => {
+    if (err) return next(err);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({
+      id: user.id,
+      email: user.email,
+      organisationId: user.organisation_id,
+      role: user.role,
+      emailVerified: user.email_verified === 1
+    });
+  });
+});
+
+// Validation schemas
+const slugValidation = param('slug')
+  .trim()
+  .matches(/^[a-z0-9-]+$/)
+  .withMessage('Slug must contain only lowercase letters, numbers, and hyphens')
+  .isLength({ min: 1, max: 50 })
+  .withMessage('Slug must be between 1 and 50 characters');
+
+// Short code generation functions
+const crypto = require('crypto');
+
+function generateShortCode() {
+  let code = '';
+  const bytes = crypto.randomBytes(SHORT_CODE_LENGTH);
+  for (let i = 0; i < SHORT_CODE_LENGTH; i++) {
+    code += SHORT_CODE_CHARS[bytes[i] % SHORT_CODE_CHARS.length];
+  }
+  return code;
+}
+
+function ensureUniqueShortCode(db, callback) {
+  let attempts = 0;
+  const tryGenerate = () => {
+    const code = generateShortCode();
+    db.get("SELECT 1 FROM cards WHERE short_code = ?", [code], (err, row) => {
+      if (err) return callback(err);
+      if (!row) return callback(null, code);
+      attempts++;
+      if (attempts > 10) return callback(new Error('Failed to generate unique short code'));
+      tryGenerate();
+    });
+  };
+  tryGenerate();
+}
+
+const cardDataValidation = [
+  body('personal.firstName').optional().trim().isLength({ max: 100 }).withMessage('First name too long'),
+  body('personal.lastName').optional().trim().isLength({ max: 100 }).withMessage('Last name too long'),
+  body('personal.title').optional().trim().isLength({ max: 200 }).withMessage('Title too long'),
+  body('personal.company').optional().trim().isLength({ max: 200 }).withMessage('Company name too long'),
+  body('personal.bio').optional().trim().isLength({ max: 1000 }).withMessage('Bio too long'),
+  body('personal.location').optional().trim().isLength({ max: 200 }).withMessage('Location too long'),
+  body('contact.email').optional().trim().custom((value) => {
+    if (value && !validator.isEmail(value)) {
+      throw new Error('Invalid email format');
+    }
+    return true;
+  }),
+  body('contact.phone').optional().trim().isLength({ max: 50 }).withMessage('Phone too long'),
+  body('contact.website').optional().trim().custom((value) => {
+    if (value && !validator.isURL(value, { protocols: ['http', 'https'] })) {
+      throw new Error('Invalid website URL');
+    }
+    return true;
+  }),
+  body('social.linkedin').optional().trim().custom((value) => {
+    if (value && !validator.isURL(value, { protocols: ['http', 'https'] })) {
+      throw new Error('Invalid LinkedIn URL');
+    }
+    return true;
+  }),
+  body('social.twitter').optional().trim().custom((value) => {
+    if (value && !validator.isURL(value, { protocols: ['http', 'https'] })) {
+      throw new Error('Invalid Twitter URL');
+    }
+    return true;
+  }),
+  body('social.instagram').optional().trim().custom((value) => {
+    if (value && !validator.isURL(value, { protocols: ['http', 'https'] })) {
+      throw new Error('Invalid Instagram URL');
+    }
+    return true;
+  }),
+  body('social.github').optional().trim().custom((value) => {
+    if (value && !validator.isURL(value, { protocols: ['http', 'https'] })) {
+      throw new Error('Invalid GitHub URL');
+    }
+    return true;
+  }),
+  body('links').optional().isArray().withMessage('Links must be an array'),
+  body('links.*.title').optional().trim().isLength({ max: 200 }).withMessage('Link title too long'),
+  body('links.*.url').optional().trim().custom((value) => {
+    if (value && !validator.isURL(value, { protocols: ['http', 'https'] })) {
+      throw new Error('Invalid link URL');
+    }
+    return true;
+  }),
+  body('images.avatar').optional().trim().isLength({ max: 500 }).withMessage('Avatar URL too long'),
+  body('images.banner').optional().trim().isLength({ max: 500 }).withMessage('Banner URL too long'),
+  body('privacy.requireInteraction').optional().isBoolean().withMessage('requireInteraction must be a boolean'),
+  body('privacy.clientSideObfuscation').optional().isBoolean().withMessage('clientSideObfuscation must be a boolean'),
+  body('privacy.blockRobots').optional().isBoolean().withMessage('blockRobots must be a boolean')
+];
+
+// GET All Cards (Admin Dashboard)
+app.get('/api/admin/cards', requireAuth, apiLimiter, (req, res, next) => {
+  if (!req.user.id) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  // Owners see all cards in organisation, members see only their own
+  let query, params;
+  const isOwner = req.user.role === 'owner';
+  
+  if (isOwner && req.user.organisationId) {
+    // First, ensure organisation has a slug - if not, generate and save it
+    db.get("SELECT slug, name FROM organisations WHERE id = ?", [req.user.organisationId], (err, orgRow) => {
+      if (err) return next(err);
+      
+      let orgSlug = orgRow?.slug;
+      // If organization doesn't have a slug, generate one from the organization name
+      if (!orgSlug && orgRow?.name) {
+        const generatedSlug = orgRow.name.toLowerCase()
+          .trim()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '') || 'organization';
+        // Update organization with generated slug
+        db.run("UPDATE organisations SET slug = ? WHERE id = ?", [generatedSlug, req.user.organisationId], (err) => {
+          if (err) return next(err);
+          orgSlug = generatedSlug;
+          executeQuery(orgSlug);
+        });
+      } else {
+        executeQuery(orgSlug);
+      }
+      
+      function executeQuery(orgSlugValue) {
+        // Owner with organization: get all users and their cards (LEFT JOIN to include users without cards)
+        const query = `
+          SELECT 
+            u.id as user_id,
+            u.email as user_email,
+            u.role as user_role,
+            u.created_at as user_created_at,
+            c.slug,
+            c.short_code,
+            c.data
+          FROM users u
+          LEFT JOIN cards c ON c.user_id = u.id
+          WHERE u.organisation_id = ?
+          ORDER BY u.created_at DESC, c.created_at DESC
+        `;
+        const params = [req.user.organisationId];
+        
+        db.all(query, params, (err, rows) => {
+          if (err) {
+            log('GET /api/admin/cards - ERROR', { error: err.message, userId: req.user.id, role: req.user.role });
+            return next(err);
+          }
+          
+          log('GET /api/admin/cards - Query result', { 
+            isOwner, 
+            organisationId: req.user.organisationId,
+            orgSlug: orgSlugValue,
+            queryUsed: 'org-query',
+            rowCount: rows.length,
+            firstRowKeys: rows.length > 0 ? Object.keys(rows[0]) : [],
+            firstRowSample: rows.length > 0 ? rows[0] : null
+          });
+          
+          const list = rows.map(row => {
+            // For owners with organization, we use LEFT JOIN so users without cards have row.data = null
+            // User info is always present (from users table)
+            const result = {
+              userId: row.user_id,
+              userEmail: row.user_email,
+              userRole: row.user_role,
+              userCreatedAt: row.user_created_at,
+              slug: row.slug || null,
+              shortCode: row.short_code || null,
+              orgSlug: orgSlugValue || null,
+              name: '',
+              title: '',
+              avatar: null,
+              email: ''
+            };
+            
+            // If user has a card, parse the card data
+            if (row.slug && row.data) {
+              try {
+                const parsed = JSON.parse(row.data);
+                result.name = `${parsed.personal?.firstName || ''} ${parsed.personal?.lastName || ''}`.trim();
+                result.title = parsed.personal?.title || '';
+                result.avatar = parsed.images?.avatar || null;
+                result.email = (parsed.contact?.email || '').toLowerCase();
+              } catch (e) {
+                result.name = 'Invalid card data';
+                result.email = row.user_email;
+              }
+            } else {
+              // User has no cards - leave name empty
+              result.name = '';
+              result.email = row.user_email;
+            }
+            
+            return result;
+          });
+          
+          log('GET /api/admin/cards - Response', { 
+            count: list.length, 
+            hasUserEmail: !!list[0]?.userEmail, 
+            userEmail: list[0]?.userEmail,
+            userId: list[0]?.userId,
+            userRole: list[0]?.userRole,
+            orgSlug: list[0]?.orgSlug
+          });
+          res.json(list);
+        });
+      }
+    });
+    
+    return; // Exit early, we'll handle the response in the callback
+  } else if (isOwner) {
+    // Owner without organization: get own cards with user info
+    query = `
+      SELECT c.slug, c.short_code, c.data, c.user_id, u.email as user_email, u.role as user_role, u.created_at as user_created_at, o.slug as org_slug
+      FROM cards c
+      JOIN users u ON c.user_id = u.id
+      LEFT JOIN organisations o ON u.organisation_id = o.id
+      WHERE c.user_id = ?
+      ORDER BY c.created_at DESC
+    `;
+    params = [req.user.id];
+  } else {
+    // Member: get own cards only (no user info needed)
+    query = `
+      SELECT c.slug, c.short_code, c.data, o.slug as org_slug
+      FROM cards c
+      JOIN users u ON c.user_id = u.id
+      LEFT JOIN organisations o ON u.organisation_id = o.id
+      WHERE c.user_id = ?
+    `;
+    params = [req.user.id];
+  }
+  
+  db.all(query, params, (err, rows) => {
+    if (err) {
+      log('GET /api/admin/cards - ERROR', { error: err.message, userId: req.user.id, role: req.user.role });
+      return next(err);
+    }
+    
+    log('GET /api/admin/cards - Query result', { 
+      isOwner, 
+      organisationId: req.user.organisationId,
+      queryUsed: isOwner && req.user.organisationId ? 'org-query' : isOwner ? 'owner-query' : 'member-query',
+      rowCount: rows.length,
+      firstRowKeys: rows.length > 0 ? Object.keys(rows[0]) : [],
+      firstRowSample: rows.length > 0 ? rows[0] : null  // Log the entire first row
+    });
+    
+    const list = rows.map(row => {
+      // For owners with organization, we use LEFT JOIN so users without cards have row.data = null
+      if (isOwner && req.user.organisationId) {
+        // User info is always present (from users table)
+        // Ensure orgSlug is set - if null, we'll need to generate it or use a default
+        let orgSlug = row.org_slug;
+        // If org slug is null, try to get it from the organization
+        if (!orgSlug && req.user.organisationId) {
+          // This shouldn't happen if JOIN worked, but handle it just in case
+          // We'll leave it as null and handle in frontend
+        }
+        
+        const result = {
+          userId: row.user_id,
+          userEmail: row.user_email,
+          userRole: row.user_role,
+          userCreatedAt: row.user_created_at,
+          slug: row.slug || null,
+          shortCode: row.short_code || null,
+          orgSlug: orgSlug || null,
+          name: '',
+          title: '',
+          avatar: null,
+          email: ''
+        };
+        
+        // If user has a card, parse the card data
+        if (row.slug && row.data) {
+          try {
+            const parsed = JSON.parse(row.data);
+            result.name = `${parsed.personal?.firstName || ''} ${parsed.personal?.lastName || ''}`.trim();
+            result.title = parsed.personal?.title || '';
+            result.avatar = parsed.images?.avatar || null;
+            result.email = (parsed.contact?.email || '').toLowerCase();
+          } catch (e) {
+            result.name = 'Invalid card data';
+            result.email = row.user_email;
+          }
+        } else {
+          // User has no cards - leave name empty
+          result.name = '';
+          result.email = row.user_email;
+        }
+        
+        return result;
+      }
+      
+      // For other cases (owner without org, or member), use original logic
+      try {
+        const parsed = JSON.parse(row.data);
+        const result = {
+          slug: row.slug,
+          shortCode: row.short_code || null,
+          orgSlug: row.org_slug || null,
+          name: `${parsed.personal?.firstName || ''} ${parsed.personal?.lastName || ''}`.trim(),
+          title: parsed.personal?.title || '',
+          avatar: parsed.images?.avatar || null,
+          email: (parsed.contact?.email || '').toLowerCase()
+        };
+        
+        // Add user info for owners (from JOIN query)
+        if (isOwner && row.user_id) {
+          result.userId = row.user_id;
+          result.userEmail = row.user_email;
+          result.userRole = row.user_role;
+          result.userCreatedAt = row.user_created_at;
+          result.orgSlug = row.org_slug || null;
+        }
+        
+        return result;
+      } catch (e) {
+        const result = {
+          slug: row.slug,
+          shortCode: row.short_code || null,
+          orgSlug: row.org_slug || null,
+          name: 'Invalid data',
+          title: '',
+          avatar: null,
+          email: ''
+        };
+
+        if (isOwner && row.user_id) {
+          result.userId = row.user_id;
+          result.userEmail = row.user_email;
+          result.userRole = row.user_role;
+          result.userCreatedAt = row.user_created_at;
+        }
+
+        return result;
+      }
+    });
+    
+    log('GET /api/admin/cards - Response', { 
+      count: list.length, 
+      hasUserInfo: list.filter(c => c.userEmail).length,
+      sampleCard: list.length > 0 ? { 
+        slug: list[0].slug, 
+        hasUserEmail: !!list[0].userEmail, 
+        userEmail: list[0].userEmail,
+        userId: list[0].userId,
+        userRole: list[0].userRole
+      } : null
+    });
+    res.json(list);
+  });
+});
+
+// GET Short Code Card (Public endpoint - short code lookup)
+// MUST come FIRST before other /api/cards routes to avoid route conflicts
+const shortCodeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per window
+  message: 'Too many short code lookup attempts',
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+app.get('/api/cards/short/:shortCode', (req, res, next) => {
+  const shortCode = (req.params.shortCode || '').trim();
+  log(`[API] GET /api/cards/short/${shortCode} - Request received`);
+  
+  // Validate: exactly 7 alphanumeric characters
+  if (!shortCode || shortCode.length !== 7) {
+    log(`[API] Short code validation failed: length=${shortCode?.length || 0}`);
+    return res.status(400).json({ error: `Short code must be exactly ${SHORT_CODE_LENGTH} characters` });
+  }
+  
+  if (!new RegExp(`^[a-zA-Z0-9]{${SHORT_CODE_LENGTH}}$`).test(shortCode)) {
+    log(`[API] Short code validation failed: invalid format`);
+    return res.status(400).json({ error: 'Short code must contain only letters and numbers' });
+  }
+  
+  log(`[API] Short code validated, querying database...`);
+  // Short codes are case-sensitive, so use exact match
+  // Also get organization slug so frontend can fetch correct settings
+  db.get(`
+    SELECT c.data, c.short_code, o.slug as org_slug
+    FROM cards c
+    JOIN users u ON c.user_id = u.id
+    LEFT JOIN organisations o ON u.organisation_id = o.id
+    WHERE c.short_code = ?
+  `, [shortCode], (err, row) => {
+    if (err) {
+      console.error('[API] Database error fetching short code:', err);
+      return next(err);
+    }
+    if (!row) {
+      log(`[API] Short code not found in database: ${shortCode}`);
+      return res.status(404).json({ error: "Card not found" });
+    }
+    try {
+      const cardData = JSON.parse(row.data);
+      // Include short_code and org_slug in response for frontend
+      cardData._shortCode = row.short_code;
+      if (row.org_slug) {
+        cardData._orgSlug = row.org_slug;
+      }
+      log(`[API] Short code found, returning card data (has personal: ${!!cardData.personal}, org_slug: ${row.org_slug})`);
+      res.json(cardData);
+    } catch (e) {
+      console.error('[API] Error parsing card data:', e);
+      next(e);
+    }
+  });
+});
+
+// GET Org-scoped Card (Public endpoint - org slug + card slug)
+// MUST come after /api/cards/short/:shortCode
+app.get('/api/cards/:orgSlug/:cardSlug', [
+  param('orgSlug').trim().matches(/^[a-z0-9-]+$/).withMessage('Invalid org slug'),
+  param('cardSlug').trim().matches(/^[a-z0-9-]+$/).withMessage('Invalid card slug')
+], handleValidationErrors, (req, res, next) => {
+  const orgSlug = req.params.orgSlug.toLowerCase();
+  const cardSlug = req.params.cardSlug.toLowerCase();
+  log(`[API] GET /api/cards/${orgSlug}/${cardSlug} - Request received`);
+  
+  // Lookup organization by slug
+  db.get("SELECT id FROM organisations WHERE slug = ?", [orgSlug], (err, org) => {
+    if (err) {
+      console.error('[API] Database error fetching org:', err);
+      return next(err);
+    }
+    if (!org) {
+      log(`[API] Organization not found: ${orgSlug}`);
+      return res.status(404).json({ error: "Card not found" }); // Generic 404, no info leakage
+    }
+    
+    log(`[API] Organization found (id: ${org.id}), querying card...`);
+    // Find card within that organization
+    db.get(`
+      SELECT c.data, c.short_code 
+      FROM cards c
+      JOIN users u ON c.user_id = u.id
+      WHERE c.slug = ? AND u.organisation_id = ?
+      LIMIT 1
+    `, [cardSlug, org.id], (err, row) => {
+      if (err) {
+        console.error('[API] Database error fetching card:', err);
+        return next(err);
+      }
+      if (!row) {
+        log(`[API] Card not found: ${cardSlug} in org ${orgSlug}`);
+        return res.status(404).json({ error: "Card not found" });
+      }
+      try {
+        const cardData = JSON.parse(row.data);
+        // Include short_code in response for frontend QR generation
+        cardData._shortCode = row.short_code;
+        log(`[API] Card found, returning card data (has personal: ${!!cardData.personal})`);
+        res.json(cardData);
+      } catch (e) {
+        console.error('[API] Error parsing card data:', e);
+        next(e);
+      }
+    });
+  });
+});
+
+// GET Single Card (Legacy endpoint - returns first match by slug, deprecated)
+app.get('/api/cards/:slug', [
+  slugValidation
+], handleValidationErrors, (req, res, next) => {
+  const slug = req.params.slug.toLowerCase();
+  // Public endpoint - get first card with this slug (multiple users can have same slug)
+  // DEPRECATED: Use /api/cards/:orgSlug/:cardSlug or /api/cards/short/:shortCode instead
+  db.get("SELECT data, short_code FROM cards WHERE slug = ? LIMIT 1", [slug], (err, row) => {
+    if (err) return next(err);
+    if (!row) return res.status(404).json({ error: "Card not found" });
+    try {
+      const cardData = JSON.parse(row.data);
+      // Include short_code in response for frontend QR generation
+      cardData._shortCode = row.short_code;
+      res.setHeader('X-Deprecated', 'true');
+      res.json(cardData);
+    } catch (e) {
+      next(e);
+    }
+  });
+});
+
+// SAVE/UPDATE Card
+app.post('/api/cards/:slug', requireAuth, apiLimiter, csrfProtection, [
+  slugValidation,
+  ...cardDataValidation
+], handleValidationErrors, (req, res, next) => {
+  const slug = req.params.slug.toLowerCase();
+  
+  // Sanitize and validate the data structure
+  const sanitizedData = {
+    personal: {
+      firstName: (req.body.personal?.firstName || '').trim().substring(0, 100),
+      lastName: (req.body.personal?.lastName || '').trim().substring(0, 100),
+      title: (req.body.personal?.title || '').trim().substring(0, 200),
+      company: (req.body.personal?.company || '').trim().substring(0, 200),
+      bio: (req.body.personal?.bio || '').trim().substring(0, 1000),
+      location: (req.body.personal?.location || '').trim().substring(0, 200)
+    },
+    contact: {
+      email: (req.body.contact?.email || '').trim(),
+      phone: (req.body.contact?.phone || '').trim().substring(0, 50),
+      website: (req.body.contact?.website || '').trim()
+    },
+    social: {
+      linkedin: (req.body.social?.linkedin || '').trim(),
+      twitter: (req.body.social?.twitter || '').trim(),
+      instagram: (req.body.social?.instagram || '').trim(),
+      github: (req.body.social?.github || '').trim()
+    },
+    theme: req.body.theme || { color: 'indigo', style: 'modern' },
+    images: {
+      avatar: (req.body.images?.avatar || '').trim().substring(0, 500),
+      banner: (req.body.images?.banner || '').trim().substring(0, 500)
+    },
+    links: (req.body.links || []).map(link => ({
+      id: link.id || Date.now(),
+      title: (link.title || '').trim().substring(0, 200),
+      url: (link.url || '').trim(),
+      icon: link.icon || 'link'
+    })).filter(link => link.url && validator.isURL(link.url, { protocols: ['http', 'https'] })),
+    privacy: {
+      requireInteraction: typeof req.body.privacy?.requireInteraction === 'boolean' ? req.body.privacy.requireInteraction : true,
+      clientSideObfuscation: typeof req.body.privacy?.clientSideObfuscation === 'boolean' ? req.body.privacy.clientSideObfuscation : false,
+      blockRobots: typeof req.body.privacy?.blockRobots === 'boolean' ? req.body.privacy.blockRobots : false
+    }
+  };
+
+  // Ensure user is authenticated
+  if (!req.user.id || !req.user.organisationId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  // Determine target userId for card creation
+  // Owners can create cards for other users in their organization
+  // Members can only create cards for themselves
+  let targetUserId = req.user.id; // Default to current user
+  
+  // Helper function to proceed with card save using determined targetUserId
+  const proceedWithCardSave = (finalTargetUserId) => {
+    // Get organization settings to enforce policies
+    getOrganizationSettings(req.user.organisationId, (err, orgSettings) => {
+      if (err) return next(err);
+    
+    // Enforce default_organisation - override user's company field
+    if (orgSettings.default_organisation) {
+      sanitizedData.personal.company = orgSettings.default_organisation;
+    }
+    
+    // Enforce theme customisation policy
+    if (!orgSettings.allow_theme_customisation) {
+      // If theme customisation not allowed, validate theme colour is in org's theme_colours
+      const requestedColor = sanitizedData.theme?.color;
+      const allowedColors = orgSettings.theme_colors || [];
+      const colorExists = allowedColors.some(c => c.name === requestedColor);
+      
+      if (!colorExists && requestedColor) {
+        // Use first available color from org's palette, or default to 'indigo'
+        sanitizedData.theme.color = allowedColors.length > 0 ? allowedColors[0].name : 'indigo';
+      }
+    }
+    
+    // Enforce image customisation policy
+    if (!orgSettings.allow_image_customisation) {
+      // Remove custom images if not allowed
+      sanitizedData.images.avatar = '';
+      sanitizedData.images.banner = '';
+    }
+    
+    // Enforce links customisation policy
+    if (!orgSettings.allow_links_customisation) {
+      // Remove all custom links if not allowed
+      sanitizedData.links = [];
+    }
+    
+    // Enforce privacy customisation policy
+    if (!orgSettings.allow_privacy_customisation) {
+      // Reset to default privacy settings if customisation not allowed
+      // Get existing card to preserve current privacy settings if they match defaults
+      db.get("SELECT data FROM cards WHERE slug = ? AND user_id = ?", [slug, finalTargetUserId], (err, existingCard) => {
+        if (err) return next(err);
+        
+        if (existingCard) {
+          try {
+            const existingData = JSON.parse(existingCard.data);
+            // Only reset if user tried to change privacy settings
+            const privacyChanged = 
+              (req.body.privacy?.requireInteraction !== undefined && 
+               req.body.privacy.requireInteraction !== existingData.privacy?.requireInteraction) ||
+              (req.body.privacy?.clientSideObfuscation !== undefined && 
+               req.body.privacy.clientSideObfuscation !== existingData.privacy?.clientSideObfuscation) ||
+              (req.body.privacy?.blockRobots !== undefined && 
+               req.body.privacy.blockRobots !== existingData.privacy?.blockRobots);
+            
+            if (privacyChanged) {
+              // Keep existing privacy settings (don't allow changes)
+              sanitizedData.privacy = existingData.privacy || {
+                requireInteraction: true,
+                clientSideObfuscation: false,
+                blockRobots: false
+              };
+            } else {
+              // No change attempted, use existing
+              sanitizedData.privacy = existingData.privacy || sanitizedData.privacy;
+            }
+          } catch (e) {
+            // If parsing fails, use defaults
+            sanitizedData.privacy = {
+              requireInteraction: true,
+              clientSideObfuscation: false,
+              blockRobots: false
+            };
+          }
+        } else {
+          // New card, use defaults
+          sanitizedData.privacy = {
+            requireInteraction: true,
+            clientSideObfuscation: false,
+            blockRobots: false
+          };
+        }
+        
+        // Check if card exists to get short code, or generate new one
+        db.get("SELECT short_code FROM cards WHERE slug = ? AND user_id = ?", [slug, finalTargetUserId], (err, existingCardWithCode) => {
+          if (err) return next(err);
+          
+          const existingShortCode = existingCardWithCode?.short_code;
+          
+          // If card exists with short code, use it; otherwise generate new one
+          if (existingShortCode) {
+            // Card exists with short code, just update data
+            const jsonContent = JSON.stringify(sanitizedData);
+            
+            const query = `
+              UPDATE cards 
+              SET data = ?, updated_at = CURRENT_TIMESTAMP
+              WHERE slug = ? AND user_id = ?
+            `;
+
+            db.run(query, [jsonContent, slug, finalTargetUserId], function(err) {
+              if (err) return next(err);
+              res.json({ success: true, slug, shortCode: existingShortCode });
+            });
+          } else {
+            // Card doesn't exist or has no short code, generate one
+            ensureUniqueShortCode(db, (err, shortCode) => {
+              if (err) return next(err);
+              
+              const jsonContent = JSON.stringify(sanitizedData);
+              
+              const query = `
+                INSERT INTO cards (slug, user_id, short_code, data, updated_at) 
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(slug, user_id) DO UPDATE SET 
+                  data = excluded.data, 
+                  short_code = COALESCE(cards.short_code, excluded.short_code),
+                  updated_at = CURRENT_TIMESTAMP
+              `;
+
+              db.run(query, [slug, finalTargetUserId, shortCode, jsonContent], function(err) {
+                if (err) return next(err);
+                res.json({ success: true, slug, shortCode });
+              });
+            });
+          }
+        });
+      });
+    } else {
+      // Privacy customisation allowed, save normally
+      // Check if card exists to get short code, or generate new one
+      db.get("SELECT short_code FROM cards WHERE slug = ? AND user_id = ?", [slug, finalTargetUserId], (err, existingCardWithCode) => {
+        if (err) return next(err);
+        
+        const existingShortCode = existingCardWithCode?.short_code;
+        
+        // If card exists with short code, use it; otherwise generate new one
+        if (existingShortCode) {
+          // Card exists with short code, just update data
+          const jsonContent = JSON.stringify(sanitizedData);
+          
+          const query = `
+            UPDATE cards 
+            SET data = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE slug = ? AND user_id = ?
+          `;
+
+          db.run(query, [jsonContent, slug, finalTargetUserId], function(err) {
+            if (err) return next(err);
+            res.json({ success: true, slug, shortCode: existingShortCode });
+          });
+        } else {
+          // Card doesn't exist or has no short code, generate one
+          ensureUniqueShortCode(db, (err, shortCode) => {
+            if (err) return next(err);
+            
+            const jsonContent = JSON.stringify(sanitizedData);
+            
+            const query = `
+              INSERT INTO cards (slug, user_id, short_code, data, updated_at) 
+              VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+              ON CONFLICT(slug, user_id) DO UPDATE SET 
+                data = excluded.data, 
+                short_code = COALESCE(cards.short_code, excluded.short_code),
+                updated_at = CURRENT_TIMESTAMP
+            `;
+
+            db.run(query, [slug, finalTargetUserId, shortCode, jsonContent], function(err) {
+              if (err) return next(err);
+              res.json({ success: true, slug, shortCode });
+            });
+          });
+        }
+      });
+    }
+    });
+  };
+  
+  // Determine target user and proceed
+  if (req.body.userId && req.user.role === 'owner') {
+    // Owner wants to create card for another user - verify they're in same organization
+    db.get("SELECT id, organisation_id FROM users WHERE id = ?", [req.body.userId], (err, targetUser) => {
+      if (err) return next(err);
+      if (!targetUser) {
+        return res.status(404).json({ error: 'Target user not found' });
+      }
+      if (targetUser.organisation_id !== req.user.organisationId) {
+        return res.status(403).json({ error: 'Cannot create card for user outside your organization' });
+      }
+      // Valid target user, proceed with card creation
+      proceedWithCardSave(req.body.userId);
+    });
+  } else {
+    // Member provided userId - ignore it, they can only create for themselves
+    // Or no userId provided - use current user
+    proceedWithCardSave(req.user.id);
+  }
+});
+
+// DELETE Card
+app.delete('/api/cards/:slug', requireAuth, apiLimiter, csrfProtection, [
+  slugValidation
+], handleValidationErrors, (req, res, next) => {
+  const slug = req.params.slug.toLowerCase();
+  // Ensure user is authenticated and can only delete their own cards
+  if (!req.user.id) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  db.run("DELETE FROM cards WHERE slug = ? AND user_id = ?", [slug, req.user.id], function(err) {
+    if (err) return next(err);
+    if (this.changes === 0) {
+      return res.status(404).json({ error: 'Card not found' });
+    }
+    res.json({ success: true });
+  });
+});
+
+// Helper function to get organization settings
+const getOrganizationSettings = (organisationId, callback) => {
+  db.all("SELECT key, value FROM organisation_settings WHERE organisation_id = ?", [organisationId], (err, rows) => {
+    if (err) return callback(err, null);
+    
+    const settings = {};
+    rows.forEach(row => {
+      try {
+        if (row.key === 'theme_colors') {
+          settings[row.key] = JSON.parse(row.value);
+        } else if (row.key.startsWith('allow_')) {
+          settings[row.key] = row.value === 'true';
+        } else {
+          settings[row.key] = row.value;
+        }
+      } catch (e) {
+        console.error(`Error parsing setting ${row.key}:`, e);
+      }
+    });
+    
+    // Ensure defaults
+    if (!settings.default_organisation) settings.default_organisation = 'My Organisation';
+    if (!settings.theme_colors || !Array.isArray(settings.theme_colors)) {
+      settings.theme_colors = getDefaultThemeColors();
+    }
+    if (!settings.theme_variant) settings.theme_variant = 'swiish';
+    if (settings.allow_theme_customisation === undefined) settings.allow_theme_customisation = true;
+    if (settings.allow_image_customisation === undefined) settings.allow_image_customisation = true;
+    if (settings.allow_links_customisation === undefined) settings.allow_links_customisation = true;
+    if (settings.allow_privacy_customisation === undefined) settings.allow_privacy_customisation = true;
+    
+    callback(null, settings);
+  });
+};
+
+// Helper function to map theme color name to hex (for SVG icon theming)
+const getThemeColorHex = (colorName) => {
+  if (!colorName || typeof colorName !== 'string') {
+    return '#4f46e5'; // default to indigo
+  }
+  
+  const normalizedColorName = colorName.toLowerCase().trim();
+  const colorMap = {
+    indigo: '#4f46e5',
+    blue: '#2563eb',
+    rose: '#e11d48',
+    emerald: '#059669',
+    slate: '#475569',
+    purple: '#7c3aed',
+    cyan: '#0891b2',
+    teal: '#0d9488',
+    orange: '#ea580c',
+    pink: '#db2777',
+    violet: '#7c3aed',
+    fuchsia: '#c026d3',
+    amber: '#d97706',
+    lime: '#65a30d',
+    green: '#16a34a',
+    yellow: '#ca8a04',
+    red: '#dc2626'
+  };
+  
+  const result = colorMap[normalizedColorName] || '#4f46e5'; // default to indigo
+  return result;
+};
+
+// GET Public Settings (theme_colors and theme_variant, no auth required)
+// Returns theme_colors and theme_variant from specified organization or default organization
+// Accepts optional ?orgSlug= parameter to get settings for a specific organization
+app.get('/api/settings', (req, res, next) => {
+  const orgSlug = req.query.orgSlug || 'default';
+  
+  // Get theme_colors and theme_variant from specified organization
+  db.all(`
+    SELECT os.key, os.value 
+    FROM organisation_settings os
+    JOIN organisations o ON os.organisation_id = o.id
+    WHERE o.slug = ? AND os.key IN ('theme_colors', 'theme_variant')
+  `, [orgSlug], (err, rows) => {
+    if (err) {
+      return next(err);
+    }
+    
+    const settings = {};
+    
+    // Parse the rows
+    rows.forEach(row => {
+      try {
+        if (row.key === 'theme_colors') {
+          settings.theme_colors = JSON.parse(row.value);
+        } else if (row.key === 'theme_variant') {
+          settings.theme_variant = row.value;
+        }
+      } catch (e) {
+        console.error(`Error parsing setting ${row.key}:`, e);
+      }
+    });
+    
+    // Ensure defaults
+    if (!settings.theme_colors || !Array.isArray(settings.theme_colors)) {
+      settings.theme_colors = getDefaultThemeColors();
+    }
+    if (!settings.theme_variant) {
+      settings.theme_variant = 'swiish';
+    }
+    
+    res.json(settings);
+  });
+});
+
+// GET Settings (Admin - full settings)
+app.get('/api/admin/settings', requireAuth, requireRole('owner'), apiLimiter, (req, res, next) => {
+  // Ensure user is authenticated and has organization
+  if (!req.user.organisationId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  db.all("SELECT key, value FROM organisation_settings WHERE organisation_id = ?", [req.user.organisationId], (err, rows) => {
+    if (err) {
+      log('GET /api/admin/settings - Database error', { error: err.message });
+      return next(err);
+    }
+    
+    log('GET /api/admin/settings - Raw database rows', {
+      organisationId: req.user.organisationId,
+      rows: rows.map(r => ({ key: r.key, value: r.value }))
+    });
+    
+    const settings = {};
+    rows.forEach(row => {
+      try {
+        if (row.key === 'theme_colors') {
+          settings[row.key] = JSON.parse(row.value);
+        } else if (row.key.startsWith('allow_')) {
+          // Convert string "true"/"false" to boolean for override toggles
+          settings[row.key] = row.value === 'true';
+        } else {
+          settings[row.key] = row.value;
+        }
+      } catch (e) {
+        log(`Error parsing setting ${row.key}`, { error: e.message, value: row.value });
+      }
+    });
+    
+    // Ensure defaults exist
+    if (!settings.default_organisation) {
+      settings.default_organisation = 'My Organisation';
+    }
+    if (!settings.theme_colors || !Array.isArray(settings.theme_colors)) {
+      settings.theme_colors = getDefaultThemeColors();
+    }
+    if (!settings.theme_variant) {
+      settings.theme_variant = 'swiish';
+    }
+    // Ensure override toggles have defaults (true = allow customisation)
+    if (settings.allow_theme_customisation === undefined) {
+      settings.allow_theme_customisation = true;
+    }
+    if (settings.allow_image_customisation === undefined) {
+      settings.allow_image_customisation = true;
+    }
+    if (settings.allow_links_customisation === undefined) {
+      settings.allow_links_customisation = true;
+    }
+    if (settings.allow_privacy_customisation === undefined) {
+      settings.allow_privacy_customisation = true;
+    }
+    
+    log('GET /api/admin/settings - Returning settings', {
+      organisationId: req.user.organisationId,
+      settings: {
+        default_organisation: settings.default_organisation,
+        theme_variant: settings.theme_variant,
+        allow_theme_customisation: settings.allow_theme_customisation,
+        allow_image_customisation: settings.allow_image_customisation,
+        allow_links_customisation: settings.allow_links_customisation,
+        allow_privacy_customisation: settings.allow_privacy_customisation,
+        theme_colors_count: settings.theme_colors?.length
+      }
+    });
+    
+    res.json(settings);
+  });
+});
+
+// POST Settings (Update)
+app.post('/api/admin/settings', requireAuth, requireRole('owner'), apiLimiter, csrfProtection, [
+  body('default_organisation').optional().trim().isLength({ max: 200 }).withMessage('Organisation name too long'),
+  body('theme_colors').optional().isArray().withMessage('Theme colors must be an array'),
+  body('theme_colors.*.name').optional().trim().isLength({ max: 50 }).withMessage('Color name too long'),
+  body('theme_colors.*.gradient').optional().trim().isLength({ max: 200 }).withMessage('Gradient too long'),
+  body('theme_colors.*.button').optional().trim().isLength({ max: 200 }).withMessage('Button classes too long'),
+  body('theme_colors.*.link').optional().trim().isLength({ max: 200 }).withMessage('Link classes too long'),
+  body('theme_colors.*.text').optional().trim().isLength({ max: 200 }).withMessage('Text classes too long'),
+  // Add validation for hex color properties
+  body('theme_colors.*.gradientStyle').optional().trim().isLength({ max: 500 }).withMessage('Gradient style too long'),
+  body('theme_colors.*.buttonStyle').optional().trim().isLength({ max: 50 }).withMessage('Button style too long'),
+  body('theme_colors.*.linkStyle').optional().trim().isLength({ max: 50 }).withMessage('Link style too long'),
+  body('theme_colors.*.textStyle').optional().trim().isLength({ max: 50 }).withMessage('Text style too long'),
+  body('theme_colors.*.colorType').optional().isIn(['tailwind', 'hex']).withMessage('Invalid color type'),
+  body('theme_colors.*.hexBase').optional().custom((value) => {
+    if (value === null || value === undefined || value === '') return true;
+    return /^#[0-9A-Fa-f]{6}$/.test(value);
+  }).withMessage('Invalid hex base color'),
+  body('theme_colors.*.hexSecondary').optional().custom((value) => {
+    if (value === null || value === undefined || value === '') return true;
+    return /^#[0-9A-Fa-f]{6}$/.test(value);
+  }).withMessage('Invalid hex secondary color'),
+  body('theme_colors.*.baseColor').optional().trim().isLength({ max: 50 }).withMessage('Base color too long'),
+  body('theme_colors.*.secondaryColor').optional().trim().isLength({ max: 50 }).withMessage('Secondary color too long'),
+  body('theme_colors.*.shade').optional().isInt({ min: 100, max: 900 }).withMessage('Invalid shade'),
+  // Validation for override toggles
+  body('allow_theme_customisation').optional().isBoolean().withMessage('allow_theme_customisation must be a boolean'),
+  body('allow_image_customisation').optional().isBoolean().withMessage('allow_image_customisation must be a boolean'),
+  body('allow_links_customisation').optional().isBoolean().withMessage('allow_links_customisation must be a boolean'),
+  body('allow_privacy_customisation').optional().isBoolean().withMessage('allow_privacy_customisation must be a boolean')
+], handleValidationErrors, (req, res, next) => {
+  // Ensure user is authenticated and has organization
+  if (!req.user.organisationId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const { 
+    default_organisation, 
+    theme_colors,
+  theme_variant,
+    allow_theme_customisation,
+    allow_image_customisation,
+    allow_links_customisation,
+    allow_privacy_customisation
+  } = req.body;
+  
+  log('POST /api/admin/settings - Received settings update', {
+    organisationId: req.user.organisationId,
+    default_organisation,
+    allow_theme_customisation,
+    allow_image_customisation,
+    allow_links_customisation,
+    allow_privacy_customisation,
+  theme_variant,
+    theme_colors_count: theme_colors?.length
+  });
+  
+  // Use promises to wait for all database operations to complete
+  const promises = [];
+  
+  if (default_organisation !== undefined) {
+    const sanitized = default_organisation.trim().substring(0, 200);
+    promises.push(new Promise((resolve, reject) => {
+      db.run(
+        "INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(organisation_id, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+        [req.user.organisationId, 'default_organisation', sanitized],
+        (err) => {
+          if (err) return reject(err);
+          resolve();
+        }
+      );
+    }));
+  }
+  
+  if (theme_colors !== undefined && Array.isArray(theme_colors)) {
+    // Sanitize theme colors - preserve ALL properties, not just Tailwind classes
+    const sanitized = theme_colors.map(color => {
+      const sanitizedColor = {
+        name: (color.name || '').trim().substring(0, 50),
+        // Preserve Tailwind classes (may be null for hex colors)
+        gradient: color.gradient ? (color.gradient || '').trim().substring(0, 200) : null,
+        button: color.button ? (color.button || '').trim().substring(0, 200) : null,
+        link: color.link ? (color.link || '').trim().substring(0, 200) : null,
+        text: color.text ? (color.text || '').trim().substring(0, 200) : null,
+        // Preserve hex styles (may be null for Tailwind colors)
+        gradientStyle: color.gradientStyle || null,
+        buttonStyle: color.buttonStyle || null,
+        linkStyle: color.linkStyle || null,
+        textStyle: color.textStyle || null,
+        // Preserve color type and hex values
+        colorType: color.colorType || null,
+        hexBase: color.hexBase || null,
+        hexSecondary: color.hexSecondary || null,
+        // Preserve base color metadata
+        baseColor: color.baseColor || null,
+        secondaryColor: color.secondaryColor || null,
+        shade: color.shade || null
+      };
+      return sanitizedColor;
+    });
+    
+    promises.push(new Promise((resolve, reject) => {
+      db.run(
+        "INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(organisation_id, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+        [req.user.organisationId, 'theme_colors', JSON.stringify(sanitized)],
+        (err) => {
+          if (err) return reject(err);
+          resolve();
+        }
+      );
+    }));
+  }
+
+  if (theme_variant !== undefined) {
+    const variant = typeof theme_variant === 'string' ? theme_variant.trim().substring(0, 50) : 'swiish';
+    promises.push(new Promise((resolve, reject) => {
+      db.run(
+        "INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(organisation_id, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+        [req.user.organisationId, 'theme_variant', variant],
+        (err) => {
+          if (err) return reject(err);
+          resolve();
+        }
+      );
+    }));
+  }
+  
+  // Save override toggles (convert boolean to "true"/"false" string for storage)
+  const saveToggle = (key, value) => {
+    if (value !== undefined && typeof value === 'boolean') {
+      promises.push(new Promise((resolve, reject) => {
+        db.run(
+          "INSERT INTO organisation_settings (organisation_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(organisation_id, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+          [req.user.organisationId, key, value ? 'true' : 'false'],
+          (err) => {
+            if (err) return reject(err);
+            resolve();
+          }
+        );
+      }));
+    }
+  };
+  
+  saveToggle('allow_theme_customisation', allow_theme_customisation);
+  saveToggle('allow_image_customisation', allow_image_customisation);
+  saveToggle('allow_links_customisation', allow_links_customisation);
+  saveToggle('allow_privacy_customisation', allow_privacy_customisation);
+  
+  // Wait for all database operations to complete before sending response
+  Promise.all(promises)
+    .then(() => {
+      log('POST /api/admin/settings - Successfully saved all settings', {
+        organisationId: req.user.organisationId,
+        promisesCompleted: promises.length
+      });
+      res.json({ success: true });
+    })
+    .catch((err) => {
+      log('POST /api/admin/settings - Error saving settings', { error: err.message, stack: err.stack });
+      next(err);
+    });
+});
+
+// --- USER MANAGEMENT ENDPOINTS (Owners only) ---
+
+// GET All Users in Organization
+app.get('/api/admin/users', requireAuth, requireRole('owner'), apiLimiter, (req, res, next) => {
+  if (!req.user.organisationId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  db.all(
+    "SELECT id, email, role, created_at FROM users WHERE organisation_id = ? ORDER BY created_at DESC",
+    [req.user.organisationId],
+    (err, rows) => {
+      if (err) return next(err);
+      res.json(rows);
+    }
+  );
+});
+
+// POST Create User (Manual creation by owner)
+app.post('/api/admin/users', requireAuth, requireRole('owner'), apiLimiter, csrfProtection, [
+  body('email').isEmail({ allow_display_name: false, require_tld: false }).withMessage('Valid email required'),
+  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+  body('role').isIn(['owner', 'member']).withMessage('Role must be owner or member')
+], handleValidationErrors, async (req, res, next) => {
+  if (!req.user.organisationId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const { email, password, role } = req.body;
+  
+  // Check if email already exists
+  db.get("SELECT id FROM users WHERE email = ?", [email.toLowerCase()], async (err, existingUser) => {
+    if (err) return next(err);
+    if (existingUser) {
+      return res.status(400).json({ error: 'User with this email already exists' });
+    }
+    
+    // Create user (owner or member) - no restriction on creating members
+    // Owners can always create members regardless of how many owners exist
+    const userId = require('crypto').randomUUID();
+    const passwordHash = await bcrypt.hash(password, 10);
+    
+    db.run(
+      "INSERT INTO users (id, email, password_hash, organisation_id, role, email_verified) VALUES (?, ?, ?, ?, ?, ?)",
+      [userId, email.toLowerCase(), passwordHash, req.user.organisationId, role, 0],
+      (err) => {
+        if (err) return next(err);
+        res.json({ success: true, userId, email: email.toLowerCase(), role });
+      }
+    );
+  });
+});
+
+// PATCH Update User Role
+app.patch('/api/admin/users/:userId', requireAuth, requireRole('owner'), apiLimiter, csrfProtection, [
+  param('userId').isUUID().withMessage('Invalid user ID'),
+  body('role').isIn(['owner', 'member']).withMessage('Role must be owner or member')
+], handleValidationErrors, (req, res, next) => {
+  if (!req.user.organisationId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const { userId } = req.params;
+  const { role } = req.body;
+  
+  // Cannot change own role
+  if (userId === req.user.id) {
+    return res.status(400).json({ error: 'Cannot change your own role' });
+  }
+  
+  // Verify user is in same organization
+  db.get("SELECT id, role FROM users WHERE id = ? AND organisation_id = ?", [userId, req.user.organisationId], (err, user) => {
+    if (err) return next(err);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // If changing from owner to member, check if this is the last owner
+    if (user.role === 'owner' && role === 'member') {
+      db.get("SELECT COUNT(*) as count FROM users WHERE organisation_id = ? AND role = 'owner'", [req.user.organisationId], (err, ownerCount) => {
+        if (err) return next(err);
+        if (ownerCount.count === 1) {
+          return res.status(400).json({ error: 'Cannot remove last owner from organization' });
+        }
+        
+        // Update role
+        db.run("UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [role, userId], (err) => {
+          if (err) return next(err);
+          res.json({ success: true });
+        });
+      });
+    } else {
+      // Update role
+      db.run("UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [role, userId], (err) => {
+        if (err) return next(err);
+        res.json({ success: true });
+      });
+    }
+  });
+});
+
+// DELETE Remove User from Organization
+app.delete('/api/admin/users/:userId', requireAuth, requireRole('owner'), apiLimiter, csrfProtection, [
+  param('userId').isUUID().withMessage('Invalid user ID')
+], handleValidationErrors, (req, res, next) => {
+  if (!req.user.organisationId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const { userId } = req.params;
+  
+  // Cannot delete yourself
+  if (userId === req.user.id) {
+    return res.status(400).json({ error: 'Cannot delete yourself' });
+  }
+  
+  // Verify user is in same organization and get their role
+  db.get("SELECT id, role FROM users WHERE id = ? AND organisation_id = ?", [userId, req.user.organisationId], (err, user) => {
+    if (err) return next(err);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // If deleting owner, check if this is the last owner
+    if (user.role === 'owner') {
+      db.get("SELECT COUNT(*) as count FROM users WHERE organisation_id = ? AND role = 'owner'", [req.user.organisationId], (err, ownerCount) => {
+        if (err) return next(err);
+        if (ownerCount.count === 1) {
+          return res.status(400).json({ error: 'Cannot delete last owner from organization' });
+        }
+        
+        // Remove user from organization (set organisation_id to NULL)
+        db.run("UPDATE users SET organisation_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [userId], (err) => {
+          if (err) return next(err);
+          res.json({ success: true });
+        });
+      });
+    } else {
+      // Remove user from organization
+      db.run("UPDATE users SET organisation_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [userId], (err) => {
+        if (err) return next(err);
+        res.json({ success: true });
+      });
+    }
+  });
+});
+
+// --- INVITATION ENDPOINTS ---
+
+// POST Create and Send Invitation
+app.post('/api/admin/invitations', requireAuth, requireRole('owner'), apiLimiter, csrfProtection, [
+  body('email').isEmail().withMessage('Valid email required'),
+  body('role').isIn(['owner', 'member']).withMessage('Role must be owner or member')
+], handleValidationErrors, async (req, res, next) => {
+  if (!req.user.organisationId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const { email, role } = req.body;
+  const emailLower = email.toLowerCase();
+  
+  // Check if user already exists
+  db.get("SELECT id FROM users WHERE email = ?", [emailLower], async (err, existingUser) => {
+    if (err) return next(err);
+    if (existingUser) {
+      return res.status(400).json({ error: 'User with this email already exists' });
+    }
+    
+    // Check if invitation already exists and not expired
+    db.get("SELECT id FROM invitations WHERE email = ? AND organisation_id = ? AND accepted_at IS NULL AND expires_at > datetime('now')", [emailLower, req.user.organisationId], async (err, existingInvitation) => {
+      if (err) return next(err);
+      if (existingInvitation) {
+        return res.status(400).json({ error: 'Active invitation already exists for this email' });
+      }
+      
+      // Generate secure token
+      const token = require('crypto').randomBytes(32).toString('hex');
+      const invitationId = require('crypto').randomUUID();
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + 7); // 7 days expiry
+      
+      // Create invitation
+      db.run(
+        "INSERT INTO invitations (id, organisation_id, email, token, role, invited_by, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [invitationId, req.user.organisationId, emailLower, token, role, req.user.id, expiresAt.toISOString()],
+        async (err) => {
+          if (err) return next(err);
+          
+          // Get organization name for email
+          db.get("SELECT name FROM organisations WHERE id = ?", [req.user.organisationId], async (err, org) => {
+            if (err) return next(err);
+            const orgName = org ? org.name : 'Organization';
+            
+            // Send invitation email
+            const invitationUrl = `${APP_URL}/invite/${token}`;
+            const emailHtml = `
+              <h2>You've been invited to join ${orgName}</h2>
+              <p>You've been invited to join ${orgName} on Swiish. Click the link below to accept the invitation and create your account.</p>
+              <p><a href="${invitationUrl}" style="background-color: #4f46e5; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Accept Invitation</a></p>
+              <p>This invitation will expire in 7 days.</p>
+              <p>If you didn't expect this invitation, you can safely ignore this email.</p>
+            `;
+            const emailText = `You've been invited to join ${orgName} on Swiish. Visit ${invitationUrl} to accept the invitation. This invitation expires in 7 days.`;
+            
+            try {
+              if (emailTransporter) {
+                await emailTransporter.sendMail({
+                  from: SMTP_FROM,
+                  to: emailLower,
+                  subject: `Invitation to join ${orgName} on Swiish`,
+                  text: emailText,
+                  html: emailHtml
+                });
+              }
+            } catch (emailErr) {
+              console.error('Failed to send invitation email:', emailErr);
+              // Don't fail the request if email fails, just log it
+            }
+            
+            res.json({ success: true, invitationId, expiresAt: expiresAt.toISOString() });
+          });
+        }
+      );
+    });
+  });
+});
+
+// GET Invitation Details (Public)
+app.get('/api/invitations/:token', [
+  param('token').isLength({ min: 64, max: 64 }).withMessage('Invalid invitation token')
+], handleValidationErrors, (req, res, next) => {
+  const { token } = req.params;
+  
+  db.get(
+    "SELECT i.id, i.email, i.role, i.expires_at, i.accepted_at, o.name as organization_name FROM invitations i JOIN organisations o ON i.organisation_id = o.id WHERE i.token = ?",
+    [token],
+    (err, invitation) => {
+      if (err) return next(err);
+      if (!invitation) {
+        return res.status(404).json({ error: 'Invitation not found' });
+      }
+      if (invitation.accepted_at) {
+        return res.status(400).json({ error: 'Invitation has already been accepted' });
+      }
+      if (new Date(invitation.expires_at) < new Date()) {
+        return res.status(400).json({ error: 'Invitation has expired' });
+      }
+      res.json({
+        email: invitation.email,
+        role: invitation.role,
+        organisationName: invitation.organization_name,
+        expiresAt: invitation.expires_at
+      });
+    }
+  );
+});
+
+// POST Accept Invitation
+app.post('/api/invitations/:token/accept', [
+  param('token').isLength({ min: 64, max: 64 }).withMessage('Invalid invitation token'),
+  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
+], handleValidationErrors, async (req, res, next) => {
+  const { token } = req.params;
+  const { password } = req.body;
+  
+  // Get invitation
+  db.get(
+    "SELECT * FROM invitations WHERE token = ?",
+    [token],
+    async (err, invitation) => {
+      if (err) return next(err);
+      if (!invitation) {
+        return res.status(404).json({ error: 'Invitation not found' });
+      }
+      if (invitation.accepted_at) {
+        return res.status(400).json({ error: 'Invitation has already been accepted' });
+      }
+      if (new Date(invitation.expires_at) < new Date()) {
+        return res.status(400).json({ error: 'Invitation has expired' });
+      }
+      
+      // Check if user already exists
+      db.get("SELECT id FROM users WHERE email = ?", [invitation.email], async (err, existingUser) => {
+        if (err) return next(err);
+        if (existingUser) {
+          return res.status(400).json({ error: 'User with this email already exists' });
+        }
+        
+        // Create user
+        const userId = require('crypto').randomUUID();
+        const passwordHash = await bcrypt.hash(password, 10);
+        
+        db.run(
+          "INSERT INTO users (id, email, password_hash, organisation_id, role, email_verified) VALUES (?, ?, ?, ?, ?, ?)",
+          [userId, invitation.email, passwordHash, invitation.organisation_id, invitation.role, 0],
+          (err) => {
+            if (err) return next(err);
+            
+            // Mark invitation as accepted
+            db.run(
+              "UPDATE invitations SET accepted_at = CURRENT_TIMESTAMP WHERE id = ?",
+              [invitation.id],
+              (err) => {
+                if (err) {
+                  console.error('Failed to mark invitation as accepted:', err);
+                  // Don't fail the request
+                }
+                
+                // Generate JWT token
+                const jwtToken = jwt.sign(
+                  {
+                    user_id: userId,
+                    organisation_id: invitation.organisation_id,
+                    role: invitation.role
+                  },
+                  JWT_SECRET,
+                  { expiresIn: JWT_EXPIRES_IN }
+                );
+                
+                // Set httpOnly cookie
+                res.cookie('authToken', jwtToken, {
+                  httpOnly: true,
+                  secure: NODE_ENV === 'production',
+                  sameSite: 'strict',
+                  maxAge: 24 * 60 * 60 * 1000 // 24 hours
+                });
+                
+                res.json({ success: true, userId, email: invitation.email, role: invitation.role });
+              }
+            );
+          }
+        );
+      });
+    }
+  );
+});
+
+// --- PASSWORD RESET ENDPOINTS ---
+
+// POST Forgot Password (Request password reset)
+app.post('/api/auth/forgot-password', apiLimiter, [
+  body('email').isEmail().withMessage('Valid email required')
+], handleValidationErrors, async (req, res, next) => {
+  const { email } = req.body;
+  const emailLower = email.toLowerCase();
+  
+  // Find user by email
+  db.get("SELECT id, email FROM users WHERE email = ?", [emailLower], async (err, user) => {
+    if (err) return next(err);
+    
+    // Always return success (don't reveal if email exists)
+    if (!user) {
+      return res.json({ success: true, message: 'If an account exists with this email, a password reset link has been sent' });
+    }
+    
+    // Generate secure token
+    const token = require('crypto').randomBytes(32).toString('hex');
+    const tokenId = require('crypto').randomUUID();
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + 1); // 1 hour expiry
+    
+    // Delete any existing unused tokens for this user
+    db.run("DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL", [user.id], (err) => {
+      if (err) {
+        console.error('Error deleting old tokens:', err);
+        // Continue anyway
+      }
+      
+      // Create password reset token
+      db.run(
+        "INSERT INTO password_reset_tokens (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)",
+        [tokenId, user.id, token, expiresAt.toISOString()],
+        async (err) => {
+          if (err) return next(err);
+          
+          // Send password reset email
+          const resetUrl = `${APP_URL}/reset-password/${token}`;
+          const emailHtml = `
+            <h2>Password Reset Request</h2>
+            <p>You requested to reset your password for your Swiish account. Click the link below to reset your password:</p>
+            <p><a href="${resetUrl}" style="background-color: #4f46e5; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Reset Password</a></p>
+            <p>This link will expire in 1 hour.</p>
+            <p>If you didn't request a password reset, you can safely ignore this email.</p>
+          `;
+          const emailText = `You requested to reset your password. Visit ${resetUrl} to reset it. This link expires in 1 hour.`;
+          
+          try {
+            if (emailTransporter) {
+              await emailTransporter.sendMail({
+                from: SMTP_FROM,
+                to: emailLower,
+                subject: 'Reset your Swiish password',
+                text: emailText,
+                html: emailHtml
+              });
+            }
+          } catch (emailErr) {
+            console.error('Failed to send password reset email:', emailErr);
+            // Don't fail the request if email fails
+          }
+          
+          res.json({ success: true, message: 'If an account exists with this email, a password reset link has been sent' });
+        }
+      );
+    });
+  });
+});
+
+// POST Reset Password (with token)
+app.post('/api/auth/reset-password', apiLimiter, [
+  body('token').isLength({ min: 64, max: 64 }).withMessage('Invalid reset token'),
+  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
+], handleValidationErrors, async (req, res, next) => {
+  const { token, password } = req.body;
+  
+  // Get reset token
+  db.get(
+    "SELECT prt.*, u.id as user_id FROM password_reset_tokens prt JOIN users u ON prt.user_id = u.id WHERE prt.token = ?",
+    [token],
+    async (err, resetToken) => {
+      if (err) return next(err);
+      if (!resetToken) {
+        return res.status(400).json({ error: 'Invalid or expired reset token' });
+      }
+      if (resetToken.used_at) {
+        return res.status(400).json({ error: 'This reset token has already been used' });
+      }
+      if (new Date(resetToken.expires_at) < new Date()) {
+        return res.status(400).json({ error: 'Reset token has expired' });
+      }
+      
+      // Hash new password
+      const passwordHash = await bcrypt.hash(password, 10);
+      
+      // Update user password
+      db.run(
+        "UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [passwordHash, resetToken.user_id],
+        (err) => {
+          if (err) return next(err);
+          
+          // Mark token as used
+          db.run(
+            "UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [resetToken.id],
+            (err) => {
+              if (err) {
+                console.error('Failed to mark token as used:', err);
+                // Don't fail the request
+              }
+              
+              res.json({ success: true, message: 'Password has been reset successfully' });
+            }
+          );
+        }
+      );
+    }
+  );
+});
+
+// POST Change Password (when logged in)
+app.post('/api/auth/change-password', requireAuth, apiLimiter, csrfProtection, [
+  body('currentPassword').notEmpty().withMessage('Current password is required'),
+  body('newPassword').isLength({ min: 8 }).withMessage('New password must be at least 8 characters')
+], handleValidationErrors, async (req, res, next) => {
+  if (!req.user.id) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const { currentPassword, newPassword } = req.body;
+  
+  // Get user
+  db.get("SELECT password_hash FROM users WHERE id = ?", [req.user.id], async (err, user) => {
+    if (err) return next(err);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Verify current password
+    const passwordMatch = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!passwordMatch) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+    
+    // Hash new password
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    
+    // Update password
+    db.run(
+      "UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+      [passwordHash, req.user.id],
+      (err) => {
+        if (err) return next(err);
+        res.json({ success: true, message: 'Password has been changed successfully' });
+      }
+    );
+  });
+});
+
+// --- EMAIL VERIFICATION ENDPOINTS ---
+
+// POST Send Verification Email
+app.post('/api/auth/send-verification', requireAuth, apiLimiter, csrfProtection, async (req, res, next) => {
+  if (!req.user.id) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  // Get user email
+  db.get("SELECT email, email_verified FROM users WHERE id = ?", [req.user.id], async (err, user) => {
+    if (err) return next(err);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (user.email_verified) {
+      return res.status(400).json({ error: 'Email is already verified' });
+    }
+    
+    // Check for existing unused verification token
+    db.get(
+      "SELECT id FROM email_verification_tokens WHERE user_id = ? AND verified_at IS NULL AND expires_at > datetime('now')",
+      [req.user.id],
+      async (err, existingToken) => {
+        if (err) return next(err);
+        if (existingToken) {
+          return res.status(400).json({ error: 'Verification email already sent. Please check your email or wait before requesting another.' });
+        }
+        
+        // Generate verification token
+        const token = require('crypto').randomBytes(32).toString('hex');
+        const tokenId = require('crypto').randomUUID();
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 7); // 7 days expiry
+        
+        // Create verification token
+        db.run(
+          "INSERT INTO email_verification_tokens (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)",
+          [tokenId, req.user.id, token, expiresAt.toISOString()],
+          async (err) => {
+            if (err) return next(err);
+            
+            // Send verification email
+            const verifyUrl = `${APP_URL}/verify-email/${token}`;
+            const emailHtml = `
+              <h2>Verify Your Email Address</h2>
+              <p>Please verify your email address by clicking the link below:</p>
+              <p><a href="${verifyUrl}" style="background-color: #4f46e5; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Verify Email</a></p>
+              <p>This link will expire in 7 days.</p>
+              <p>If you didn't create an account, you can safely ignore this email.</p>
+            `;
+            const emailText = `Please verify your email address by visiting ${verifyUrl}. This link expires in 7 days.`;
+            
+            try {
+              if (emailTransporter) {
+                await emailTransporter.sendMail({
+                  from: SMTP_FROM,
+                  to: user.email,
+                  subject: 'Verify your Swiish email address',
+                  text: emailText,
+                  html: emailHtml
+                });
+              }
+            } catch (emailErr) {
+              console.error('Failed to send verification email:', emailErr);
+              return res.status(500).json({ error: 'Failed to send verification email' });
+            }
+            
+            res.json({ success: true, message: 'Verification email sent' });
+          }
+        );
+      }
+    );
+  });
+});
+
+// GET Verify Email (with token)
+app.get('/api/auth/verify-email/:token', [
+  param('token').isLength({ min: 64, max: 64 }).withMessage('Invalid verification token')
+], handleValidationErrors, (req, res, next) => {
+  const { token } = req.params;
+  
+  // Get verification token
+  db.get(
+    "SELECT evt.*, u.id as user_id, u.email FROM email_verification_tokens evt JOIN users u ON evt.user_id = u.id WHERE evt.token = ?",
+    [token],
+    (err, verificationToken) => {
+      if (err) return next(err);
+      if (!verificationToken) {
+        return res.status(400).json({ error: 'Invalid or expired verification token' });
+      }
+      if (verificationToken.verified_at) {
+        return res.status(400).json({ error: 'Email has already been verified' });
+      }
+      if (new Date(verificationToken.expires_at) < new Date()) {
+        return res.status(400).json({ error: 'Verification token has expired' });
+      }
+      
+      // Mark email as verified
+      db.run(
+        "UPDATE users SET email_verified = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [verificationToken.user_id],
+        (err) => {
+          if (err) return next(err);
+          
+          // Mark token as verified
+          db.run(
+            "UPDATE email_verification_tokens SET verified_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [verificationToken.id],
+            (err) => {
+              if (err) {
+                console.error('Failed to mark token as verified:', err);
+                // Don't fail the request
+              }
+              
+              res.json({ success: true, message: 'Email verified successfully' });
+            }
+          );
+        }
+      );
+    }
+  );
+});
+
+// Dynamic per-card manifest endpoint
+app.get('/manifest/:slug.json', [
+  slugValidation
+], handleValidationErrors, async (req, res, next) => {
+  const slug = req.params.slug.toLowerCase();
+  
+
+  // Load base manifest from disk (fallback if needed)
+  let baseManifest = {
+    short_name: 'Swiish',
+    name: 'Swiish',
+    start_url: '.',
+    display: 'standalone',
+    background_color: '#020617',
+    theme_color: '#020617',
+    icons: [
+      { src: '/swiish-logo.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }
+    ]
+  };
+
+  try {
+    const manifestPath = path.join(__dirname, 'public', 'manifest.json');
+    try {
+      const raw = await fs.promises.readFile(manifestPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      baseManifest = {
+        short_name: parsed.short_name || baseManifest.short_name,
+        name: parsed.name || baseManifest.name,
+        start_url: parsed.start_url || baseManifest.start_url,
+        display: parsed.display || baseManifest.display,
+        background_color: parsed.background_color || baseManifest.background_color,
+        theme_color: parsed.theme_color || baseManifest.theme_color,
+        icons: Array.isArray(parsed.icons) && parsed.icons.length > 0 ? parsed.icons : baseManifest.icons
+      };
+    } catch (readErr) {
+      // File doesn't exist or can't be read - use default manifest
+      // This is fine, we have a fallback
+    }
+  } catch (err) {
+    console.error('Failed to read base manifest:', err);
+  }
+
+  db.get("SELECT data FROM cards WHERE slug = ?", [slug], (err, row) => {
+    if (err) return next(err);
+
+    let cardName = 'Swiish Card';
+    if (row && row.data) {
+      try {
+        const parsed = JSON.parse(row.data);
+        const first = (parsed.personal?.firstName || '').trim();
+        const last = (parsed.personal?.lastName || '').trim();
+        const full = `${first} ${last}`.trim();
+        cardName = full || parsed.personal?.company || cardName;
+      } catch (e) {
+        // fallback to default cardName
+      }
+    }
+
+    const startUrl = `/${slug}/`;
+    const manifest = {
+      ...baseManifest,
+      name: cardName,
+      short_name: cardName.length > 20 ? cardName.slice(0, 20) : cardName,
+      start_url: startUrl,
+      scope: startUrl,
+      icons: [
+        { src: `/icons/${slug}.svg`, sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+        { src: `/icons/${slug}.svg`, sizes: '192x192', type: 'image/svg+xml' },
+        { src: `/icons/${slug}.svg`, sizes: '512x512', type: 'image/svg+xml' }
+      ]
+    };
+
+
+    res.json(manifest);
+  });
+});
+
+// Dynamic themed SVG icon endpoint
+app.get('/icons/:slug.svg', [
+  slugValidation
+], handleValidationErrors, (req, res, next) => {
+  const slug = req.params.slug.toLowerCase();
+
+
+  db.get("SELECT data FROM cards WHERE slug = ?", [slug], (err, row) => {
+    if (err) return next(err);
+
+
+    let themeColor = 'indigo';
+    if (row && row.data) {
+      try {
+        const parsed = JSON.parse(row.data);
+        themeColor = parsed.theme?.color || 'indigo';
+      } catch (e) {
+      }
+    } else {
+    }
+
+    // Query settings for theme_colors to get custom hex values (from default organization)
+    db.get(`
+      SELECT os.value 
+      FROM organisation_settings os
+      JOIN organisations o ON os.organisation_id = o.id
+      WHERE o.slug = 'default' AND os.key = ?
+    `, ['theme_colors'], (settingsErr, settingsRow) => {
+      let fillColor = '#4f46e5'; // default to indigo
+      
+      if (!settingsErr && settingsRow && settingsRow.value) {
+        try {
+          const theme_colors = JSON.parse(settingsRow.value);
+          const colorEntry = theme_colors.find(c => c.name === themeColor);
+          if (colorEntry) {
+            // Use textStyle (hex value) or hexBase, fall back to colorMap
+            fillColor = colorEntry.textStyle || colorEntry.hexBase || getThemeColorHex(themeColor);
+          } else {
+            // Color not found in settings, use colorMap
+            fillColor = getThemeColorHex(themeColor);
+          }
+        } catch (e) {
+          // Parse error, fall back to colorMap
+          fillColor = getThemeColorHex(themeColor);
+        }
+      } else {
+        // No settings found, use colorMap
+        fillColor = getThemeColorHex(themeColor);
+      }
+
+
+      // SVG path from Swiish_Logo_Device.svg
+      const svgPath = "M104.91,26.83h-15.04v-14.83c0-6.6-5.4-12-12-12H0v41.66c0,6.6,5.4,12,12,12h12.5v-26.83h15v6.57h-6.77v20.26h45.13c6.6,0,12-5.4,12-12v-6.83h15.04c2.17,0,4,1.83,4,4v32.05c0,2.17-1.83,4-4,4H36.66c-2.17,0-4-1.83-4-4v-2.24h-8v2.24c0,6.6,5.4,12,12,12h68.26c6.6,0,12-5.4,12-12v-32.05c0-6.6-5.4-12-12-12Z";
+
+      const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_2" data-name="Layer 2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 116.91 82.89">
+  <g id="Layer_1-2" data-name="Layer 1">
+    <path fill="${fillColor}" d="${svgPath}"/>
+  </g>
+</svg>`;
+
+
+      res.type('image/svg+xml').send(svg);
+    });
+  });
+});
+
+// Admin endpoint to view logs
+app.get('/api/admin/logs', requireAuth, apiLimiter, (req, res, next) => {
+  try {
+    // Return last 100 lines
+    const recentLogs = logLines.slice(-100);
+    res.json({ logs: recentLogs, totalLines: logLines.length });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// QR Code Generation Endpoint
+// GET: accepts slug or short code, generates QR with short code URL
+app.get('/api/qr/:identifier', [
+  param('identifier').trim().matches(/^[a-zA-Z0-9-]+$/).withMessage('Invalid identifier')
+], handleValidationErrors, async (req, res, next) => {
+  try {
+    const identifier = req.params.identifier;
+    const baseUrl = req.protocol + '://' + req.get('host');
+    
+    // Check if it's a short code (exactly 7 alphanumeric chars) or slug
+    const isShortCode = /^[a-zA-Z0-9]{7}$/.test(identifier);
+    
+    let cardUrl;
+    if (isShortCode) {
+      // Use short code directly
+      cardUrl = `${baseUrl}/${identifier}`;
+      
+      const qrDataUrl = await QRCode.toDataURL(cardUrl, {
+        errorCorrectionLevel: 'M',
+        type: 'image/png',
+        width: 200,
+        margin: 1
+      });
+      
+      res.json({ qrCode: qrDataUrl });
+    } else {
+      // Legacy: lookup by slug to get short code
+      const slug = identifier.toLowerCase();
+      db.get("SELECT short_code FROM cards WHERE slug = ? LIMIT 1", [slug], async (err, row) => {
+        if (err) return next(err);
+        if (!row || !row.short_code) {
+          return res.status(404).json({ error: "Card not found" });
+        }
+        cardUrl = `${baseUrl}/${row.short_code}`;
+        
+        try {
+          const qrDataUrl = await QRCode.toDataURL(cardUrl, {
+            errorCorrectionLevel: 'M',
+            type: 'image/png',
+            width: 200,
+            margin: 1
+          });
+          res.json({ qrCode: qrDataUrl });
+        } catch (qrErr) {
+          next(qrErr);
+        }
+      });
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST: optionally accept a rich payload to encode in the QR,
+// falling back to the card short code URL if payload is missing/invalid.
+app.post('/api/qr/:identifier', [
+  param('identifier').trim().matches(/^[a-zA-Z0-9-]+$/).withMessage('Invalid identifier'),
+  body('payload')
+    .optional()
+    .isString()
+    .isLength({ max: 5000 })
+    .withMessage('payload must be a string up to 5000 characters')
+], handleValidationErrors, async (req, res, next) => {
+  try {
+    const identifier = req.params.identifier;
+    const baseUrl = req.protocol + '://' + req.get('host');
+    
+    // Check if it's a short code (exactly 7 alphanumeric chars) or slug
+    const isShortCode = /^[a-zA-Z0-9]{7}$/.test(identifier);
+    
+    let cardUrl;
+    if (isShortCode) {
+      // Use short code directly
+      cardUrl = `${baseUrl}/${identifier}`;
+    } else {
+      // Legacy: lookup by slug to get short code
+      const slug = identifier.toLowerCase();
+      db.get("SELECT short_code FROM cards WHERE slug = ? LIMIT 1", [slug], async (err, row) => {
+        if (err) return next(err);
+        if (!row || !row.short_code) {
+          return res.status(404).json({ error: "Card not found" });
+        }
+        cardUrl = `${baseUrl}/${row.short_code}`;
+        
+        let qrContent = cardUrl;
+        if (typeof req.body?.payload === 'string' && req.body.payload.trim()) {
+          // Use the provided payload as-is; it may itself be JSON
+          qrContent = req.body.payload.trim();
+        }
+
+        try {
+          const qrDataUrl = await QRCode.toDataURL(qrContent, {
+            errorCorrectionLevel: 'M',
+            type: 'image/png',
+            width: 200,
+            margin: 1
+          });
+          res.json({ qrCode: qrDataUrl });
+        } catch (qrErr) {
+          next(qrErr);
+        }
+      });
+      return;
+    }
+
+    let qrContent = cardUrl;
+    if (typeof req.body?.payload === 'string' && req.body.payload.trim()) {
+      // Use the provided payload as-is; it may itself be JSON
+      qrContent = req.body.payload.trim();
+    }
+
+    const qrDataUrl = await QRCode.toDataURL(qrContent, {
+      errorCorrectionLevel: 'M',
+      type: 'image/png',
+      width: 200,
+      margin: 1
+    });
+
+    res.json({ qrCode: qrDataUrl });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Error handling middleware (must be last)
+app.use(errorHandler);
+
+// SPA Fallback - only for non-API and non-static routes
+app.get('*', async (req, res, next) => {
+  // Don't serve index.html for static assets or API routes
+  if (req.path.startsWith('/static/') || req.path.startsWith('/api/') || req.path.startsWith('/uploads/') || req.path.startsWith('/manifest/') || req.path.startsWith('/icons/')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  
+  try {
+    // Read index.html from build directory
+    const indexPath = path.join(__dirname, 'build', 'index.html');
+    let html = await fs.promises.readFile(indexPath, 'utf8');
+    
+    // Inject nonce into script tags
+    html = html.replace(
+      /<script(\s|>)/g,
+      `<script nonce="${res.locals.nonce}"$1`
+    );
+    
+    // Replace %PUBLIC_URL% if needed (React build should already handle this, but be safe)
+    html = html.replace(/%PUBLIC_URL%/g, '');
+    
+    // Set no-cache headers for index.html to ensure fresh content
+    res.set({
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+      'Content-Type': 'text/html; charset=utf-8'
+    });
+    
+    res.send(html);
+  } catch (err) {
+    // If file doesn't exist or can't be read, return 404
+    if (err.code === 'ENOENT') {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    next(err);
+  }
+});
+
+app.listen(PORT, () => {
+  // Startup logs are always useful, keep them
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Environment: ${NODE_ENV}`);
+  if (NODE_ENV === 'production') {
+    console.log('HTTPS enforcement and security features enabled');
+  }
+});

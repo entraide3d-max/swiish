@@ -1,0 +1,21 @@
+services:
+  swiish:
+    build: .
+    container_name: swiish
+    restart: unless-stopped
+    ports:
+      - "8095:3000"
+    environment:
+      # WARNING: These must be set in your .env file or environment
+      # Never use default values in production!
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
+      - APP_URL=${APP_URL:-http://localhost:8095}
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=3000
+      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-24h}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:8095}
+      - MAX_FILE_SIZE=${MAX_FILE_SIZE:-5242880}
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
