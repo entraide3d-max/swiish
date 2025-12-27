@@ -211,9 +211,17 @@ body > * {
 .dark .border-success-border-dark,
 .dark .border-success-border { border-color: var(--color-success-border-dark) !important; }
 
+.hover\:border-success-border:hover { border-color: var(--color-success-light) !important; }
+.dark .hover\:border-success-border-dark:hover,
+.dark .hover\:border-success-border:hover { border-color: var(--color-success-dark) !important; }
+
 .border-error-border { border-color: var(--color-error-border-light) !important; }
 .dark .border-error-border-dark,
 .dark .border-error-border { border-color: var(--color-error-border-dark) !important; }
+
+.hover\:border-error-border:hover { border-color: var(--color-error-light) !important; }
+.dark .hover\:border-error-border-dark:hover,
+.dark .hover\:border-error-border:hover { border-color: var(--color-error-dark) !important; }
 
 .border-info-border { border-color: var(--color-info-border-light) !important; }
 .dark .border-info-border-dark,

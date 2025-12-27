@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2025-12-27
+
+### Fixed
+- Phone country selector flag icons now display correctly (was showing broken images)
+- View button on admin page now has proper contrast (changed to match edit button styling)
+- Content Security Policy updated to allow GitHub API calls for version checking
+
+### Added
+- Automatic design token annotation system - adds `data-theme-*` attributes to all elements for easier theming in Chrome DevTools
+- Version badge hover indicators - green border on hover when up-to-date, red border when update available
+- Country flag icons support via `country-flag-icons` package
+
+### Changed
+- Version badge styling improved with colored hover borders for better visual feedback
+
 ## [0.1.1] - 2025-12-24
 
 ### Fixed

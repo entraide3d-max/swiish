@@ -330,27 +330,37 @@ app.use((req, res, next) => {
   next();
 });
 
-// Security headers
-app.use(helmet({
-  contentSecurityPolicy: (req, res) => ({
-    directives: {
-      defaultSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "https:"],
-      // Use nonces for inline scripts instead of unsafe-inline
-      scriptSrc: [
-        "'self'",
-        `'nonce-${res.locals.nonce}'`
-      ],
-      styleSrc: ["'self'", "'unsafe-inline'"], // Keep for CSS (less critical)
-      fontSrc: ["'self'", "data:"],
-      // Allow debug logging endpoint in development only (for development debugging)
-      connectSrc: NODE_ENV === 'development' 
-        ? ["'self'", "http://127.0.0.1:7243", "http://localhost:7243"]
-        : ["'self'"]
-    }
-  }),
-  crossOriginEmbedderPolicy: false
-}));
+// Security headers - configure CSP with connect-src for GitHub API
+const cspDirectives = {
+  defaultSrc: ["'self'"],
+  imgSrc: ["'self'", "data:", "https:"],
+  styleSrc: ["'self'", "'unsafe-inline'"], // Keep for CSS (less critical)
+  fontSrc: ["'self'", "data:"],
+  // Allow debug logging endpoint in development only (for development debugging)
+  // Also allow GitHub API for version checking
+  connectSrc: NODE_ENV === 'development' 
+    ? ["'self'", "http://127.0.0.1:7243", "http://localhost:7243", "https://api.github.com"]
+    : ["'self'", "https://api.github.com"]
+};
+
+app.use((req, res, next) => {
+  // Set scriptSrc with nonce for this request
+  const scriptSrc = [
+    "'self'",
+    `'nonce-${res.locals.nonce}'`
+  ];
+  
+  helmet({
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: {
+        ...cspDirectives,
+        scriptSrc: scriptSrc
+      }
+    },
+    crossOriginEmbedderPolicy: false
+  })(req, res, next);
+});
 
 // CORS configuration
 app.use(cors({

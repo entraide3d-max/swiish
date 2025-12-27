@@ -3,6 +3,7 @@ import { Routes, Route, useNavigate, useLocation, useParams } from 'react-router
 import DOMPurify from 'dompurify';
 import PhoneInput from 'react-phone-number-input';
 import 'react-phone-number-input/style.css';
+import flags from 'country-flag-icons/react/3x2';
 import { 
   Camera, Upload, Save, Share2, Phone, Mail, Globe, 
   Linkedin, Twitter, Instagram, Github, Edit3, Eye, 
@@ -18,7 +19,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { arrayMove } from '@dnd-kit/sortable';
 
 const API_ENDPOINT = '/api';
-const APP_VERSION = '0.1.1'; // Update this to match package.json version
+const APP_VERSION = '0.1.2'; // Update this to match package.json version
 const GITHUB_URL = 'https://github.com/MrCrin/swiish';
 const swiishTheme = require('./theme/swiish');
 const minimalTheme = require('./theme/minimal');
@@ -485,10 +486,10 @@ function VersionBadge() {
         href={GITHUB_URL}
         target="_blank"
         rel="noopener noreferrer"
-        className={`text-xs font-medium transition-colors bg-card dark:bg-card-dark border border-border dark:border-border-dark px-2 py-1 rounded shadow-sm hover:shadow-md ${
+        className={`text-xs font-medium transition-all bg-card dark:bg-card-dark border-2 border-border dark:border-border-dark px-2 py-1 rounded shadow-sm hover:shadow-md ${
           isOutdated 
-            ? 'text-error-text dark:text-error-text-dark border-error-border dark:border-error-border hover:bg-error-bg dark:hover:bg-error-bg-dark' 
-            : 'text-text-primary dark:text-text-primary-dark hover:text-action dark:hover:text-action-dark'
+            ? 'text-error-text dark:text-error-text-dark hover:bg-error-bg dark:hover:bg-error-bg-dark hover:border-error-border dark:hover:border-error-border-dark' 
+            : 'text-text-primary dark:text-text-primary-dark hover:text-action dark:hover:text-action-dark hover:border-success-border dark:hover:border-success-border-dark'
         }`}
         title={isOutdated ? "Update available on GitHub" : "View on GitHub"}
       >
@@ -1714,7 +1715,7 @@ const [settings, setSettings] = useState({
                                   href={card.shortCode ? `/${card.shortCode}` : (card.orgSlug && card.slug ? `/${card.orgSlug}/${card.slug}` : `/${card.slug}`)} 
                                   target="_blank" 
                                   rel="noreferrer" 
-                                  className="flex-1 py-2 text-xs font-medium text-text-secondary dark:text-text-secondary-dark bg-surface dark:bg-surface-dark rounded-button hover:bg-surface dark:hover:bg-surface-dark flex items-center justify-center gap-1"
+                                  className="flex-1 py-2 text-xs font-medium text-confirm-text dark:text-confirm-text-dark bg-confirm dark:bg-confirm-dark rounded-button hover:bg-confirm-hover dark:hover:bg-confirm-hover-dark flex items-center justify-center gap-1"
                                 >
                                   <ExternalLink className="w-3 h-3"/> View
                                 </a>
@@ -2280,7 +2281,7 @@ const [settings, setSettings] = useState({
                                     href={card.shortCode ? `/${card.shortCode}` : (card.orgSlug && card.slug ? `/${card.orgSlug}/${card.slug}` : `/${card.slug}`)} 
                                     target="_blank" 
                                     rel="noreferrer" 
-                                    className="flex-1 py-2 text-xs font-medium text-text-secondary dark:text-text-secondary-dark bg-surface dark:bg-surface-dark rounded-button hover:bg-surface dark:hover:bg-surface-dark flex items-center justify-center gap-1"
+                                    className="flex-1 py-2 text-xs font-medium text-confirm-text dark:text-confirm-text-dark bg-confirm dark:bg-confirm-dark rounded-button hover:bg-confirm-hover dark:hover:bg-confirm-hover-dark flex items-center justify-center gap-1"
                                   >
                                     <ExternalLink className="w-3 h-3"/> View
                                   </a>
@@ -3588,6 +3589,7 @@ function EditorView({ data, setData, onBack, onSave, slug, settings, csrfToken, 
                       value={data.contact.phone || ''}
                       onChange={(value) => handleInputChange('contact', 'phone', value || '')}
                       placeholder="Phone"
+                      flags={flags}
                     />
                   </div>
                   <Input icon={Globe} placeholder="Website" value={data.contact.website} onChange={v => handleInputChange('contact', 'website', v)} type="url" />
