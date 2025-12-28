@@ -16,6 +16,8 @@ COPY --from=build /app/build ./build
 COPY package*.json ./
 RUN npm install --production
 COPY server.js .
+COPY database.json .
+COPY migrations/ ./migrations/
 
 # Create dirs for volumes
 RUN mkdir data

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2025-12-28
+
+### Fixed
+- Version badge now correctly displays version from package.json
+- Docker deployment fixed: database.json and migrations/ now included in Docker image
+
+### Changed
+- Version management: APP_VERSION now automatically reads from package.json, eliminating need to update version in multiple places
+
 ## [0.2.0] - 2025-12-28
 
 ### Breaking Changes

@@ -135,13 +135,63 @@ const dbRun = util.promisify(db.run.bind(db));
 const dbGet = util.promisify(db.get.bind(db));
 
 
-// Helper function to get default theme colours
+// Helper function to get default theme colours (hex-only format)
 const getDefaultThemeColors = () => [
-  { name: "indigo", gradient: "from-indigo-600 to-purple-600", button: "bg-indigo-600 hover:bg-indigo-700", link: "text-indigo-600 bg-indigo-50 border-indigo-100 hover:bg-indigo-100", text: "text-indigo-600" },
-  { name: "blue", gradient: "from-blue-600 to-cyan-600", button: "bg-blue-600 hover:bg-blue-700", link: "text-blue-600 bg-blue-50 border-blue-100 hover:bg-blue-100", text: "text-blue-600" },
-  { name: "rose", gradient: "from-rose-500 to-orange-500", button: "bg-rose-600 hover:bg-rose-700", link: "text-rose-600 bg-rose-50 border-rose-100 hover:bg-rose-100", text: "text-rose-600" },
-  { name: "emerald", gradient: "from-emerald-500 to-teal-500", button: "bg-emerald-600 hover:bg-emerald-700", link: "text-emerald-600 bg-emerald-50 border-emerald-100 hover:bg-emerald-100", text: "text-emerald-600" },
-  { name: "slate", gradient: "from-slate-700 to-slate-900", button: "bg-slate-800 hover:bg-slate-900", link: "text-slate-700 bg-slate-100 border-slate-200 hover:bg-slate-200", text: "text-slate-800" }
+  { 
+    name: "indigo", 
+    colorType: "standard", 
+    baseColor: "indigo", 
+    hexBase: "#4f46e5", 
+    hexSecondary: "#7c3aed",
+    gradientStyle: "linear-gradient(135deg, #4f46e5, #7c3aed)",
+    buttonStyle: "#4f46e5",
+    linkStyle: "#4f46e5",
+    textStyle: "#4f46e5"
+  },
+  { 
+    name: "blue", 
+    colorType: "standard", 
+    baseColor: "blue", 
+    hexBase: "#2563eb", 
+    hexSecondary: "#0891b2",
+    gradientStyle: "linear-gradient(135deg, #2563eb, #0891b2)",
+    buttonStyle: "#2563eb",
+    linkStyle: "#2563eb",
+    textStyle: "#2563eb"
+  },
+  { 
+    name: "rose", 
+    colorType: "standard", 
+    baseColor: "rose", 
+    hexBase: "#e11d48", 
+    hexSecondary: "#ea580c",
+    gradientStyle: "linear-gradient(135deg, #e11d48, #ea580c)",
+    buttonStyle: "#e11d48",
+    linkStyle: "#e11d48",
+    textStyle: "#e11d48"
+  },
+  { 
+    name: "emerald", 
+    colorType: "standard", 
+    baseColor: "emerald", 
+    hexBase: "#059669", 
+    hexSecondary: "#0d9488",
+    gradientStyle: "linear-gradient(135deg, #059669, #0d9488)",
+    buttonStyle: "#059669",
+    linkStyle: "#059669",
+    textStyle: "#059669"
+  },
+  { 
+    name: "slate", 
+    colorType: "standard", 
+    baseColor: "slate", 
+    hexBase: "#475569", 
+    hexSecondary: "#475569",
+    gradientStyle: "linear-gradient(135deg, #475569, #475569)",
+    buttonStyle: "#475569",
+    linkStyle: "#475569",
+    textStyle: "#475569"
+  }
 ];
 
 // Database migrations are handled by db-migrate (see migrations/ directory)
@@ -1760,7 +1810,7 @@ app.post('/api/admin/settings', requireAuth, requireRole('owner'), apiLimiter, c
   body('theme_colors.*.buttonStyle').optional().trim().isLength({ max: 50 }).withMessage('Button style too long'),
   body('theme_colors.*.linkStyle').optional().trim().isLength({ max: 50 }).withMessage('Link style too long'),
   body('theme_colors.*.textStyle').optional().trim().isLength({ max: 50 }).withMessage('Text style too long'),
-  body('theme_colors.*.colorType').optional().isIn(['tailwind', 'hex']).withMessage('Invalid color type'),
+  body('theme_colors.*.colorType').optional().isIn(['standard', 'custom']).withMessage('Invalid color type'),
   body('theme_colors.*.hexBase').optional().custom((value) => {
     if (value === null || value === undefined || value === '') return true;
     return /^#[0-9A-Fa-f]{6}$/.test(value);

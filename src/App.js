@@ -19,7 +19,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { arrayMove } from '@dnd-kit/sortable';
 
 const API_ENDPOINT = '/api';
-const APP_VERSION = '0.1.2'; // Update this to match package.json version
+const APP_VERSION = require('../package.json').version; // Automatically read from package.json
 const GITHUB_URL = 'https://github.com/MrCrin/swiish';
 const swiishTheme = require('./theme/swiish');
 const minimalTheme = require('./theme/minimal');
