@@ -206,27 +206,27 @@ const getDefaultTemplate = (settings) => ({
 // --- STYLES ---
 // Helper functions to get color classes from settings
 const getThemeGradient = (colorName, settings) => {
-  if (!settings?.theme_colors) return "from-indigo-600 to-purple-600";
+  if (!settings?.theme_colors) return "linear-gradient(135deg, #4f46e5, #7c3aed)";
   const color = settings.theme_colors.find(c => c.name === colorName);
-  return color?.gradient || "from-indigo-600 to-purple-600";
+  return color?.gradientStyle || "linear-gradient(135deg, #4f46e5, #7c3aed)";
 };
 
 const getButtonColor = (colorName, settings) => {
-  if (!settings?.theme_colors) return "bg-indigo-600 hover:bg-indigo-700";
+  if (!settings?.theme_colors) return "#4f46e5";
   const color = settings.theme_colors.find(c => c.name === colorName);
-  return color?.button || "bg-indigo-600 hover:bg-indigo-700";
+  return color?.buttonStyle || "#4f46e5";
 };
 
 const getLinkColor = (colorName, settings) => {
-  if (!settings?.theme_colors) return "text-indigo-600 bg-indigo-50 border-indigo-100 hover:bg-indigo-100";
+  if (!settings?.theme_colors) return "#4f46e5";
   const color = settings.theme_colors.find(c => c.name === colorName);
-  return color?.link || "text-indigo-600 bg-indigo-50 border-indigo-100 hover:bg-indigo-100";
+  return color?.linkStyle || "#4f46e5";
 };
 
 const getTextColor = (colorName, settings) => {
-  if (!settings?.theme_colors) return "text-indigo-600";
+  if (!settings?.theme_colors) return "#4f46e5";
   const color = settings.theme_colors.find(c => c.name === colorName);
-  return color?.text || "text-indigo-600";
+  return color?.textStyle || "#4f46e5";
 };
 
 // --- COLOR GENERATION UTILITIES ---
@@ -310,37 +310,6 @@ const darkenHex = (hex, percent) => {
   return `#${toHex(newR)}${toHex(newG)}${toHex(newB)}`;
 };
 
-const generateColorClasses = (baseColor, secondaryColor, shade = 600, colorType = 'tailwind', hexBase = null, hexSecondary = null) => {
-  if (colorType === 'hex' && hexBase) {
-    // For hex colors, we'll use inline styles
-    const secondaryHex = hexSecondary || hexBase; // Use same color if no secondary provided
-    return {
-      gradient: null, // Will use inline style
-      button: null, // Will use inline style
-      link: null, // Will use inline style
-      text: null, // Will use inline style
-      gradientStyle: `linear-gradient(135deg, ${hexBase}, ${secondaryHex})`,
-      buttonStyle: hexBase,
-      linkStyle: hexBase,
-      textStyle: hexBase
-    };
-  }
-  
-  // Tailwind colors
-  const secondary = secondaryColor || getComplementaryColor(baseColor);
-  const nextShade = Math.min(shade + 100, 900);
-  
-  return {
-    gradient: `from-${baseColor}-${shade} to-${secondary}-${shade}`,
-    button: `bg-${baseColor}-${shade} hover:bg-${baseColor}-${nextShade}`,
-    link: `text-${baseColor}-${shade} bg-${baseColor}-50 border-${baseColor}-100 hover:bg-${baseColor}-100`,
-    text: `text-${baseColor}-${shade}`,
-    gradientStyle: null,
-    buttonStyle: null,
-    linkStyle: null,
-    textStyle: null
-  };
-};
 
 // Extract base color from existing gradient class (for migration)
 const extractBaseColorFromGradient = (gradient) => {
@@ -1006,6 +975,80 @@ const [settings, setSettings] = useState({
     }
   }, [settings]);
 
+  // Helper to initialize color data for settings (shared between fetchSettings and SettingsView)
+  // Note: SettingsView has its own initializeColorData function, but we need this one for fetchSettings
+  const initializeColorDataForSettings = (colors) => {
+    if (!colors || !Array.isArray(colors)) return [];
+    return colors.map(color => {
+      let hexBase, baseColor, colorType;
+      
+      // Determine if this is a standard color (has Tailwind gradient or baseColor) or custom hex
+      const hasValidTailwindGradient = color.gradient && typeof color.gradient === 'string' && color.gradient.startsWith('from-');
+      const hasHexBase = color.hexBase && typeof color.hexBase === 'string' && color.hexBase.startsWith('#');
+      
+      if (hasValidTailwindGradient) {
+        // Convert from Tailwind gradient to hex
+        const extracted = extractBaseColorFromGradient(color.gradient);
+        if (extracted) {
+          baseColor = extracted.baseColor;
+          hexBase = getTailwindColorHex(extracted.baseColor, 600); // Always use shade 600
+          colorType = 'standard';
+        } else {
+          // Fallback if extraction fails
+          baseColor = color.baseColor || 'indigo';
+          hexBase = hasHexBase ? color.hexBase : getTailwindColorHex(baseColor, 600);
+          colorType = color.colorType === 'custom' ? 'custom' : 'standard';
+        }
+      } else if (hasHexBase) {
+        // Has hexBase - determine if standard or custom
+        if (color.baseColor && color.colorType !== 'custom') {
+          // Standard color with hexBase
+          baseColor = color.baseColor;
+          hexBase = color.hexBase;
+          colorType = 'standard';
+        } else {
+          // Custom hex color
+          baseColor = null;
+          hexBase = color.hexBase;
+          colorType = 'custom';
+        }
+      } else if (color.gradientStyle) {
+        // Has gradientStyle but no hexBase - extract from gradientStyle or use default
+        baseColor = null;
+        hexBase = '#4f46e5'; // Default
+        colorType = 'custom';
+      } else {
+        // Fallback - treat as standard with default
+        baseColor = color.baseColor || 'indigo';
+        hexBase = getTailwindColorHex(baseColor, 600);
+        colorType = color.colorType === 'custom' ? 'custom' : 'standard';
+      }
+      
+      // Always auto-generate complementary secondary color
+      const complementaryColor = baseColor ? getComplementaryColor(baseColor) : null;
+      const hexSecondary = color.hexSecondary || (complementaryColor ? getTailwindColorHex(complementaryColor, 600) : hexBase);
+      
+      // Generate all inline styles
+      const gradientStyle = `linear-gradient(135deg, ${hexBase}, ${hexSecondary})`;
+      const buttonStyle = hexBase;
+      const linkStyle = hexBase;
+      const textStyle = hexBase;
+      
+      // Build clean hex-only color object
+      return {
+        name: color.name,
+        colorType: colorType,
+        baseColor: baseColor, // null for custom, Tailwind name for standard
+        hexBase: hexBase,
+        hexSecondary: hexSecondary,
+        gradientStyle: gradientStyle,
+        buttonStyle: buttonStyle,
+        linkStyle: linkStyle,
+        textStyle: textStyle
+      };
+    });
+  };
+
   const fetchSettings = async () => {
     try {
       const res = await apiCall(`${API_ENDPOINT}/admin/settings`);
@@ -1013,7 +1056,8 @@ const [settings, setSettings] = useState({
         const settingsData = await res.json();
       const merged = {
         ...settingsData,
-        theme_variant: settingsData.theme_variant || 'swiish'
+        theme_variant: settingsData.theme_variant || 'swiish',
+        theme_colors: initializeColorDataForSettings(settingsData.theme_colors || [])
       };
       setSettings(merged);
       applyThemeCssVars(merged.theme_variant);
@@ -1039,7 +1083,7 @@ const [settings, setSettings] = useState({
           default_organisation: settingsData.default_organisation || 'My Organisation',
           theme_variant: mergedVariant,
           theme_colors: (settingsData.theme_colors && Array.isArray(settingsData.theme_colors)) 
-            ? settingsData.theme_colors 
+            ? initializeColorDataForSettings(settingsData.theme_colors)
             : THEME_PRESETS.swiish
         };
         
@@ -1555,7 +1599,7 @@ const [settings, setSettings] = useState({
           <div className="bg-card dark:bg-card-dark max-w-sm w-full rounded-page shadow-xl p-8">
             <div className="text-center mb-8">
               <div className="w-16 h-16 bg-indigo-100 dark:bg-indigo-900/30 rounded-full flex items-center justify-center mx-auto mb-4 text-indigo-600 dark:text-indigo-400"><Lock className="w-8 h-8" /></div>
-              <h1 className="text-2xl font-bold text-text-primary dark:text-text-primary-dark">Admin Access</h1>
+              <h1 className="text-2xl font-bold text-text-primary dark:text-text-primary-dark">Login</h1>
             </div>
             <form onSubmit={handleLogin} className="space-y-4">
               <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" className="w-full px-5 py-3 rounded-input border border-border dark:border-border-dark bg-input-bg dark:bg-input-bg-dark text-text-primary dark:text-text-primary-dark focus:outline-none focus:ring-2 focus:ring-focus-ring dark:focus:ring-focus-ring-dark" autoFocus />
@@ -1563,7 +1607,7 @@ const [settings, setSettings] = useState({
               {error && <div className="flex items-center gap-2 text-error-text dark:text-error-text-dark text-sm">{error}</div>}
               <button type="submit" className="w-full py-3.5 rounded-full bg-confirm dark:bg-confirm-dark text-confirm-text dark:text-confirm-text-dark font-bold hover:bg-confirm-hover dark:hover:bg-confirm-hover-dark transition-colors">Login</button>
             </form>
-            <div className="text-center mt-auto pt-4 pb-4 border-t border-border-subtle dark:border-border-dark group relative z-10">
+            <div className="text-center mt-8 group relative z-10">
               <div className="flex justify-center">
                 <img src="/graphics/Swiish_Logo.svg" alt="Swiish" className="h-4 w-auto dark:hidden swiish-logo" />
                 <img src="/graphics/Swiish_Logo_DarkBg.svg" alt="Swiish" className="h-4 w-auto hidden dark:block swiish-logo" />
@@ -1748,11 +1792,11 @@ const [settings, setSettings] = useState({
             )}
           </div>
         </div>
-        <div className="text-center mt-auto pt-4 pb-4 group relative z-10">
-          <div className="flex justify-center">
-            <img src="/graphics/Swiish_Logo.svg" alt="Swiish" className="h-4 w-auto dark:hidden swiish-logo" />
-            <img src="/graphics/Swiish_Logo_DarkBg.svg" alt="Swiish" className="h-4 w-auto hidden dark:block swiish-logo" />
-          </div>
+      </div>
+      <div className="fixed bottom-4 right-4 z-10 text-center group">
+        <div className="flex justify-center">
+          <img src="/graphics/Swiish_Logo.svg" alt="Swiish" className="h-4 w-auto dark:hidden swiish-logo" />
+          <img src="/graphics/Swiish_Logo_DarkBg.svg" alt="Swiish" className="h-4 w-auto hidden dark:block swiish-logo" />
         </div>
       </div>
       <Modal isOpen={modal.isOpen} onClose={closeModal} type={modal.type} title={modal.title} message={modal.message} onConfirm={modal.onConfirm} confirmText={modal.confirmText} cancelText={modal.cancelText} />
@@ -2118,7 +2162,7 @@ const [settings, setSettings] = useState({
             <div className="bg-card dark:bg-card-dark max-w-sm w-full rounded-page shadow-xl p-8">
               <div className="text-center mb-8">
                 <div className="w-16 h-16 bg-indigo-100 dark:bg-indigo-900/30 rounded-full flex items-center justify-center mx-auto mb-4 text-indigo-600 dark:text-indigo-400"><Lock className="w-8 h-8" /></div>
-                <h1 className="text-2xl font-bold text-text-primary dark:text-text-primary-dark">Admin Access</h1>
+                <h1 className="text-2xl font-bold text-text-primary dark:text-text-primary-dark">Login</h1>
               </div>
               <form onSubmit={handleLogin} className="space-y-4">
                 <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" className="w-full px-5 py-3 rounded-input border border-border dark:border-border-dark bg-input-bg dark:bg-input-bg-dark text-text-primary dark:text-text-primary-dark focus:outline-none focus:ring-2 focus:ring-focus-ring dark:focus:ring-focus-ring-dark" autoFocus />
@@ -2126,7 +2170,7 @@ const [settings, setSettings] = useState({
                 {error && <div className="flex items-center gap-2 text-error-text dark:text-error-text-dark text-sm">{error}</div>}
                 <button type="submit" className="w-full py-3.5 rounded-full bg-confirm dark:bg-confirm-dark text-confirm-text dark:text-confirm-text-dark font-bold hover:bg-confirm-hover dark:hover:bg-confirm-hover-dark transition-colors">Login</button>
               </form>
-            <div className="text-center mt-auto pt-4 pb-4 border-t border-border-subtle dark:border-border-dark group relative z-10">
+            <div className="text-center mt-8 group relative z-10">
               <div className="flex justify-center">
                 <img src="/graphics/Swiish_Logo.svg" alt="Swiish" className="h-4 w-auto dark:hidden swiish-logo" />
                 <img src="/graphics/Swiish_Logo_DarkBg.svg" alt="Swiish" className="h-4 w-auto hidden dark:block swiish-logo" />
@@ -3094,11 +3138,8 @@ END:VCARD`;
           <img src={images.banner} className="w-full h-full object-cover" alt="banner" />
         ) : (
           (() => {
-            const color = settings?.theme_colors?.find(c => c.name === theme.color);
-            if (color?.gradientStyle) {
-              return <div className="w-full h-full opacity-90" style={{ background: color.gradientStyle }} />;
-            }
-            return <div className={`w-full h-full bg-gradient-to-br ${getThemeGradient(theme.color, settings)} opacity-90`} />;
+            const gradientStyle = getThemeGradient(theme.color, settings);
+            return <div className="w-full h-full opacity-90" style={{ background: gradientStyle }} />;
           })()
         )}
         <div className="absolute top-4 right-4 flex gap-2">
@@ -3202,7 +3243,7 @@ END:VCARD`;
             if (color?.textStyle) {
               return <div className="text-lg font-medium" style={{ color: color.textStyle }}>{title}</div>;
             }
-            return <div className={`text-lg font-medium ${getTextColor(theme.color, settings)}`}>{title}</div>;
+            return <div className="text-lg font-medium" style={{ color: getTextColor(theme.color, settings) }}>{title}</div>;
           })()}
           <div className="flex items-center text-text-muted dark:text-text-muted-dark text-sm gap-2"><Briefcase className="w-4 h-4" /><span>{sanitizeText(personal.company || '')}</span></div>
           {personal.location && <div className="flex items-center text-text-muted-subtle dark:text-text-muted-dark text-sm gap-2 mt-1"><MapPin className="w-4 h-4" /><span>{sanitizeText(personal.location)}</span></div>}
@@ -3237,7 +3278,11 @@ END:VCARD`;
                 );
               }
               return (
-                <button onClick={generateVCard} className={`col-span-2 flex items-center justify-center gap-2 py-3.5 rounded-full font-bold text-white shadow-lg transition-transform active:scale-[0.98] ${getButtonColor(theme.color, settings)}`}>
+                <button 
+                  onClick={generateVCard} 
+                  className="col-span-2 flex items-center justify-center gap-2 py-3.5 rounded-full font-bold text-white shadow-lg transition-transform active:scale-[0.98]"
+                  style={{ backgroundColor: getButtonColor(theme.color, settings) }}
+                >
                   <Save className="w-5 h-5" /> Save Contact
                 </button>
               );
@@ -3407,7 +3452,8 @@ END:VCARD`;
                   href={link.url} 
                   target="_blank" 
                   rel="noreferrer"
-                  className={`flex items-center p-4 rounded-input border transition-all active:scale-[0.99] ${getLinkColor(theme.color, settings)} dark:border-border-dark`}
+                  className="flex items-center p-4 rounded-input border transition-all active:scale-[0.99] dark:border-border-dark"
+                  style={{ color: getLinkColor(theme.color, settings) }}
                   onMouseEnter={(e) => {
                     const iconContainer = e.target.querySelector('.link-icon-container');
                     if (iconContainer) {
@@ -3759,15 +3805,12 @@ function EditorView({ data, setData, onBack, onSave, slug, settings, csrfToken, 
                      <div className="flex flex-wrap gap-4">
                        {(settings?.theme_colors || []).map(color => (
                          <div 
-                           key={color.name} 
-                           className={`w-12 h-12 rounded-full relative ${data.theme.color === color.name ? 'ring-4 ring-slate-200 scale-110' : ''}`}
-                           style={color.gradientStyle ? { background: color.gradientStyle } : {}}
-                         >
-                           {!color.gradientStyle && (
-                             <div className={`w-full h-full rounded-full bg-gradient-to-br ${color.gradient || 'from-indigo-600 to-purple-600'}`} />
-                           )}
-                           {data.theme.color === color.name && <Check className="w-5 h-5 text-white absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10" />}
-                         </div>
+                          key={color.name} 
+                          className={`w-12 h-12 rounded-full relative ${data.theme.color === color.name ? 'ring-4 ring-slate-200 scale-110' : ''}`}
+                          style={{ background: color.gradientStyle || 'linear-gradient(135deg, #4f46e5, #7c3aed)' }}
+                        >
+                          {data.theme.color === color.name && <Check className="w-5 h-5 text-white absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10" />}
+                        </div>
                        ))}
                      </div>
                    </LockedOption>
@@ -3775,16 +3818,13 @@ function EditorView({ data, setData, onBack, onSave, slug, settings, csrfToken, 
                    <div className="flex flex-wrap gap-4">
                      {(settings?.theme_colors || []).map(color => (
                        <button 
-                         key={color.name} 
-                         onClick={() => handleInputChange('theme', 'color', color.name)} 
-                         className={`w-12 h-12 rounded-full relative hover:scale-110 ${data.theme.color === color.name ? 'ring-4 ring-slate-200 scale-110' : ''}`}
-                         style={color.gradientStyle ? { background: color.gradientStyle } : {}}
-                       >
-                         {!color.gradientStyle && (
-                           <div className={`w-full h-full rounded-full bg-gradient-to-br ${color.gradient || 'from-indigo-600 to-purple-600'}`} />
-                         )}
-                         {data.theme.color === color.name && <Check className="w-5 h-5 text-white absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10" />}
-                       </button>
+                        key={color.name} 
+                        onClick={() => handleInputChange('theme', 'color', color.name)} 
+                        className={`w-12 h-12 rounded-full relative hover:scale-110 ${data.theme.color === color.name ? 'ring-4 ring-slate-200 scale-110' : ''}`}
+                        style={{ background: color.gradientStyle || 'linear-gradient(135deg, #4f46e5, #7c3aed)' }}
+                      >
+                        {data.theme.color === color.name && <Check className="w-5 h-5 text-white absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10" />}
+                      </button>
                      ))}
                    </div>
                  )}
@@ -4003,7 +4043,7 @@ function ColorSelector({ selectedColor, onSelect, label, showAuto = false, autoL
                 ? 'border-indigo-500 dark:border-indigo-400 ring-2 ring-indigo-200 dark:ring-indigo-800 scale-105'
                 : 'border-border dark:border-border-dark hover:border-border-dark dark:hover:border-border-dark'
             }`}
-            title={color}
+            title={color.charAt(0).toUpperCase() + color.slice(1)}
           >
             <div className={`w-full h-full bg-gradient-to-br ${colorGradients[color] || 'from-gray-500 to-gray-700'}`} />
           </button>
@@ -4454,45 +4494,71 @@ function SettingsView({ settings, setSettings, onBack, onSave, apiCall, showAler
   // Initialize local settings with extracted base colors from existing data
   const initializeColorData = (colors) => {
     return colors.map(color => {
-      // Check if this is a hex color - prioritize colorType if present, otherwise check for gradientStyle
-      if (color.colorType === 'hex' || color.gradientStyle || (color.gradient && !color.gradient.startsWith('from-'))) {
-        return {
-          ...color,  // Spread first to preserve all existing properties
-          colorType: 'hex',
-          // Preserve hexBase exactly as stored - don't default to purple
-          // Only default if this is a NEW color being initialized (not from database)
-          hexBase: color.hexBase !== undefined ? color.hexBase : (color.gradientStyle ? null : '#4f46e5'),
-          hexSecondary: color.hexSecondary !== undefined ? color.hexSecondary : null,
-          baseColor: color.baseColor || 'indigo',
-          shade: color.shade || 600,
-          secondaryColor: color.secondaryColor || null
-        };
+      let hexBase, baseColor, colorType;
+      
+      // Determine if this is a standard color (has Tailwind gradient or baseColor) or custom hex
+      const hasValidTailwindGradient = color.gradient && typeof color.gradient === 'string' && color.gradient.startsWith('from-');
+      const hasHexBase = color.hexBase && typeof color.hexBase === 'string' && color.hexBase.startsWith('#');
+      
+      if (hasValidTailwindGradient) {
+        // Convert from Tailwind gradient to hex
+        const extracted = extractBaseColorFromGradient(color.gradient);
+        if (extracted) {
+          baseColor = extracted.baseColor;
+          hexBase = getTailwindColorHex(extracted.baseColor, 600); // Always use shade 600
+          colorType = 'standard';
+        } else {
+          // Fallback if extraction fails
+          baseColor = color.baseColor || 'indigo';
+          hexBase = hasHexBase ? color.hexBase : getTailwindColorHex(baseColor, 600);
+          colorType = color.colorType === 'custom' ? 'custom' : 'standard';
+        }
+      } else if (hasHexBase) {
+        // Has hexBase - determine if standard or custom
+        if (color.baseColor && color.colorType !== 'custom') {
+          // Standard color with hexBase
+          baseColor = color.baseColor;
+          hexBase = color.hexBase;
+          colorType = 'standard';
+        } else {
+          // Custom hex color
+          baseColor = null;
+          hexBase = color.hexBase;
+          colorType = 'custom';
+        }
+      } else if (color.gradientStyle) {
+        // Has gradientStyle but no hexBase - extract from gradientStyle or use default
+        baseColor = null;
+        hexBase = '#4f46e5'; // Default
+        colorType = 'custom';
+      } else {
+        // Fallback - treat as standard with default
+        baseColor = color.baseColor || 'indigo';
+        hexBase = getTailwindColorHex(baseColor, 600);
+        colorType = color.colorType === 'custom' ? 'custom' : 'standard';
       }
       
-      // Tailwind color - extract from gradient
-      const extracted = extractBaseColorFromGradient(color.gradient);
-      if (extracted) {
-        // Extract secondary color from gradient
-        const secondaryMatch = color.gradient.match(/to-(\w+)-(\d+)/);
-        return {
-          ...color,
-          colorType: 'tailwind',
-          baseColor: extracted.baseColor,
-          shade: extracted.shade,
-          secondaryColor: secondaryMatch ? secondaryMatch[1] : null,
-          hexBase: null,
-          hexSecondary: null
-        };
-      }
-      // Default fallback
+      // Always auto-generate complementary secondary color
+      const complementaryColor = baseColor ? getComplementaryColor(baseColor) : null;
+      const hexSecondary = color.hexSecondary || (complementaryColor ? getTailwindColorHex(complementaryColor, 600) : hexBase);
+      
+      // Generate all inline styles
+      const gradientStyle = `linear-gradient(135deg, ${hexBase}, ${hexSecondary})`;
+      const buttonStyle = hexBase;
+      const linkStyle = hexBase;
+      const textStyle = hexBase;
+      
+      // Build clean hex-only color object
       return {
-        ...color,
-        colorType: 'tailwind',
-        baseColor: 'indigo',
-        shade: 600,
-        secondaryColor: null,
-        hexBase: null,
-        hexSecondary: null
+        name: color.name,
+        colorType: colorType,
+        baseColor: baseColor, // null for custom, Tailwind name for standard
+        hexBase: hexBase,
+        hexSecondary: hexSecondary,
+        gradientStyle: gradientStyle,
+        buttonStyle: buttonStyle,
+        linkStyle: linkStyle,
+        textStyle: textStyle
       };
     });
   };
@@ -4549,47 +4615,19 @@ function SettingsView({ settings, setSettings, onBack, onSave, apiCall, showAler
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      // Generate classes from base colors before saving
+      // Save hex-only color structure
       const colorsToSave = localSettings.theme_colors.map(color => {
-        // DETERMINE colorType FIRST, before generating classes
-        const isHexColor = color.colorType === 'hex' || 
-                          (color.hexBase && color.colorType !== 'tailwind') || 
-                          (color.gradientStyle && !color.gradient);
-        const colorType = isHexColor ? 'hex' : (color.colorType || 'tailwind');
-        
-        // NOW generate classes with the correct colorType
-        const classes = generateColorClasses(
-          color.baseColor || 'indigo',
-          color.secondaryColor || null,
-          color.shade || 600,
-          colorType,  // Use determined colorType, not default
-          color.hexBase || null,
-          color.hexSecondary || null
-        );
-        
-        const savedColor = {
+        return {
           name: color.name,
-          ...classes
+          colorType: color.colorType || 'standard',
+          baseColor: color.baseColor || null, // null for custom, Tailwind name for standard
+          hexBase: color.hexBase || '#4f46e5',
+          hexSecondary: color.hexSecondary || color.hexBase || '#4f46e5',
+          gradientStyle: color.gradientStyle || `linear-gradient(135deg, ${color.hexBase || '#4f46e5'}, ${color.hexSecondary || color.hexBase || '#4f46e5'})`,
+          buttonStyle: color.buttonStyle || color.hexBase || '#4f46e5',
+          linkStyle: color.linkStyle || color.hexBase || '#4f46e5',
+          textStyle: color.textStyle || color.hexBase || '#4f46e5'
         };
-        
-        // Preserve hex values and colorType for hex colors
-        if (isHexColor) {
-          // For hex colors, hexBase is REQUIRED - don't save as hex if it's missing
-          if (!color.hexBase || typeof color.hexBase !== 'string' || !color.hexBase.startsWith('#')) {
-            // Invalid hex color - don't save as hex, fall back to tailwind
-            console.warn(`Color ${color.name} cannot be saved as hex - missing or invalid hexBase`);
-            // Don't add hex properties, let it save as tailwind
-          } else {
-            savedColor.colorType = 'hex';
-            savedColor.hexBase = color.hexBase; // Save actual value, not || null
-            savedColor.hexSecondary = color.hexSecondary || null;
-            savedColor.baseColor = color.baseColor || 'indigo';
-            savedColor.secondaryColor = color.secondaryColor || null;
-            savedColor.shade = color.shade || 600;
-          }
-        }
-        
-        return savedColor;
       });
 
       const res = await apiCall(`${API_ENDPOINT}/admin/settings`, {
@@ -4621,18 +4659,21 @@ function SettingsView({ settings, setSettings, onBack, onSave, apiCall, showAler
   };
 
   const addColor = () => {
+    const baseColor = 'indigo';
+    const hexBase = getTailwindColorHex(baseColor, 600);
+    const complementary = getComplementaryColor(baseColor);
+    const hexSecondary = getTailwindColorHex(complementary, 600);
+    
     const newColor = {
       name: `color${localSettings.theme_colors.length + 1}`,
-      colorType: 'tailwind',
-      baseColor: 'indigo',
-      shade: 600,
-      secondaryColor: null,
-      hexBase: null,
-      hexSecondary: null,
-      gradient: "from-indigo-600 to-purple-600",
-      button: "bg-indigo-600 hover:bg-indigo-700",
-      link: "text-indigo-600 bg-indigo-50 border-indigo-100 hover:bg-indigo-100",
-      text: "text-indigo-600"
+      colorType: 'standard',
+      baseColor: baseColor,
+      hexBase: hexBase,
+      hexSecondary: hexSecondary,
+      gradientStyle: `linear-gradient(135deg, ${hexBase}, ${hexSecondary})`,
+      buttonStyle: hexBase,
+      linkStyle: hexBase,
+      textStyle: hexBase
     };
     setLocalSettings(prev => {
       const newColors = [...prev.theme_colors, newColor];
@@ -4650,68 +4691,95 @@ function SettingsView({ settings, setSettings, onBack, onSave, apiCall, showAler
       const updated = prev.theme_colors.map((c, idx) => {
         if (idx === colorIndex) {
           const updatedColor = { ...c, [field]: value };
-          const currentColorType = updatedColor.colorType || c.colorType || 'tailwind';
+          const currentColorType = updatedColor.colorType || c.colorType || 'standard';
           
-          // When editing hex values, ensure colorType is set to 'hex'
-          if ((field === 'hexBase' || field === 'hexSecondary') && currentColorType !== 'hex') {
-            updatedColor.colorType = 'hex';
-          }
-          
-          // When switching to hex mode, populate hex values from standard color
-          if (field === 'colorType' && value === 'hex' && !c.hexBase) {
-            updatedColor.hexBase = getTailwindColorHex(c.baseColor || 'indigo', c.shade || 600);
-            if (c.secondaryColor) {
-              updatedColor.hexSecondary = getTailwindColorHex(c.secondaryColor, c.shade || 600);
-            } else {
-              // Use complementary color hex
-              const complementary = getComplementaryColor(c.baseColor || 'indigo');
-              updatedColor.hexSecondary = getTailwindColorHex(complementary, c.shade || 600);
+          // Handle colorType changes
+          if (field === 'colorType') {
+            if (value === 'standard' && !updatedColor.baseColor) {
+              // Switching to standard - set default baseColor if missing
+              updatedColor.baseColor = c.baseColor || 'indigo';
+              updatedColor.hexBase = c.hexBase || getTailwindColorHex(updatedColor.baseColor, 600);
+            } else if (value === 'custom') {
+              // Switching to custom - clear baseColor
+              updatedColor.baseColor = null;
             }
           }
           
-          // When in standard color mode, sync hex values when baseColor, shade, or secondaryColor changes
-          if (currentColorType === 'tailwind' && (field === 'baseColor' || field === 'shade' || field === 'secondaryColor')) {
-            const baseColor = field === 'baseColor' ? value : (updatedColor.baseColor || c.baseColor || 'indigo');
-            const shade = field === 'shade' ? value : (updatedColor.shade || c.shade || 600);
-            const secondaryColor = field === 'secondaryColor' ? (value !== null ? value : null) : (updatedColor.secondaryColor !== null ? updatedColor.secondaryColor : c.secondaryColor);
-            
-            // Update hexBase to match the standard color
-            updatedColor.hexBase = getTailwindColorHex(baseColor, shade);
-            
-            // Update hexSecondary
-            if (secondaryColor !== null) {
-              updatedColor.hexSecondary = getTailwindColorHex(secondaryColor, shade);
-            } else {
-              // Use complementary color
-              const complementary = getComplementaryColor(baseColor);
-              updatedColor.hexSecondary = getTailwindColorHex(complementary, shade);
+          // For standard colors: when baseColor changes, update hexBase
+          if (currentColorType === 'standard' && field === 'baseColor') {
+            updatedColor.hexBase = getTailwindColorHex(value, 600);
+          }
+          
+          // For custom colors: when hexBase changes, ensure colorType is custom
+          if (field === 'hexBase') {
+            if (currentColorType !== 'custom') {
+              updatedColor.colorType = 'custom';
+              updatedColor.baseColor = null;
             }
           }
           
-          // Auto-generate classes when base color, secondary, shade, colorType, or hex values change
-          if (field === 'baseColor' || field === 'secondaryColor' || field === 'shade' || field === 'colorType' || field === 'hexBase' || field === 'hexSecondary') {
-            // Ensure colorType is preserved when updating hex values
-            const finalColorType = updatedColor.colorType || c.colorType || 'tailwind';
-            const finalHexBase = updatedColor.hexBase !== undefined ? updatedColor.hexBase : c.hexBase;
-            const finalHexSecondary = updatedColor.hexSecondary !== undefined ? updatedColor.hexSecondary : c.hexSecondary;
-            
-            const classes = generateColorClasses(
-              updatedColor.baseColor || c.baseColor || 'indigo',
-              updatedColor.secondaryColor !== null ? updatedColor.secondaryColor : (field === 'secondaryColor' ? null : c.secondaryColor),
-              updatedColor.shade || c.shade || 600,
-              finalColorType,
-              finalHexBase || null,
-              finalHexSecondary !== undefined ? finalHexSecondary : null
-            );
-            // Preserve colorType and hex values when spreading classes
-            return { 
-              ...updatedColor, 
-              ...classes,
-              colorType: finalColorType,
-              hexBase: finalHexBase,
-              hexSecondary: finalHexSecondary !== undefined ? finalHexSecondary : null
-            };
+          // Handle hexBase
+          let hexBase = updatedColor.hexBase || c.hexBase;
+          let baseColor = updatedColor.baseColor || c.baseColor;
+          
+          // If hexBase is missing, generate it
+          if (!hexBase) {
+            if (baseColor) {
+              hexBase = getTailwindColorHex(baseColor, 600);
+              updatedColor.hexBase = hexBase;
+            } else {
+              hexBase = '#4f46e5'; // Default
+              updatedColor.hexBase = hexBase;
+            }
           }
+          
+          // Handle hexSecondary
+          let hexSecondary;
+          
+          if (currentColorType === 'standard') {
+            // Standard colors always use auto-complementary
+            const complementaryColor = baseColor ? getComplementaryColor(baseColor) : null;
+            hexSecondary = complementaryColor ? getTailwindColorHex(complementaryColor, 600) : hexBase;
+            updatedColor.hexSecondary = hexSecondary;
+          } else if (currentColorType === 'custom') {
+            // Custom colors: allow manual setting
+            if (field === 'hexSecondary') {
+              // User is manually setting hexSecondary
+              hexSecondary = value || null;
+              updatedColor.hexSecondary = hexSecondary;
+            } else if (field === 'baseColor' || field === 'hexBase' || field === 'colorType') {
+              // When baseColor/hexBase changes, only auto-generate if hexSecondary is not manually set
+              const existingHexSecondary = c.hexSecondary;
+              if (!existingHexSecondary || existingHexSecondary === '') {
+                // Auto-generate complementary
+                const complementaryColor = baseColor ? getComplementaryColor(baseColor) : null;
+                hexSecondary = complementaryColor ? getTailwindColorHex(complementaryColor, 600) : hexBase;
+                updatedColor.hexSecondary = hexSecondary;
+              } else {
+                // Keep existing manual value
+                hexSecondary = existingHexSecondary;
+                updatedColor.hexSecondary = hexSecondary;
+              }
+            } else {
+              // Keep existing value
+              hexSecondary = updatedColor.hexSecondary || c.hexSecondary || hexBase;
+              updatedColor.hexSecondary = hexSecondary;
+            }
+          } else {
+            // Fallback
+            hexSecondary = updatedColor.hexSecondary || c.hexSecondary || hexBase;
+            updatedColor.hexSecondary = hexSecondary;
+          }
+          
+          // Always regenerate inline styles when relevant fields change
+          if (field === 'baseColor' || field === 'colorType' || field === 'hexBase' || field === 'hexSecondary') {
+            const finalHexSecondary = hexSecondary || hexBase;
+            updatedColor.gradientStyle = `linear-gradient(135deg, ${hexBase}, ${finalHexSecondary})`;
+            updatedColor.buttonStyle = hexBase;
+            updatedColor.linkStyle = hexBase;
+            updatedColor.textStyle = hexBase;
+          }
+          
           return updatedColor;
         }
         return c;
@@ -4992,9 +5060,9 @@ function SettingsView({ settings, setSettings, onBack, onSave, apiCall, showAler
                           <label className="text-sm font-medium text-text-primary dark:text-text-secondary-dark mb-2 block">Color Type</label>
                           <div className="flex gap-2">
                             <button
-                              onClick={() => updateColor(index, 'colorType', 'tailwind')}
+                              onClick={() => updateColor(index, 'colorType', 'standard')}
                               className={`flex-1 px-4 py-2 rounded-button border transition-all ${
-                                (color.colorType || 'tailwind') === 'tailwind'
+                                (color.colorType || 'standard') === 'standard'
                                   ? 'bg-indigo-50 dark:bg-indigo-900/30 border-indigo-500 dark:border-indigo-400 text-indigo-700 dark:text-indigo-300 font-medium'
                                   : 'bg-card dark:bg-surface-dark border-border dark:border-border-dark text-text-secondary dark:text-text-secondary-dark hover:bg-surface dark:hover:bg-surface-dark'
                               }`}
@@ -5002,70 +5070,31 @@ function SettingsView({ settings, setSettings, onBack, onSave, apiCall, showAler
                               Standard Colors
                             </button>
                             <button
-                              onClick={() => updateColor(index, 'colorType', 'hex')}
+                              onClick={() => updateColor(index, 'colorType', 'custom')}
                               className={`flex-1 px-4 py-2 rounded-button border transition-all ${
-                                color.colorType === 'hex'
+                                color.colorType === 'custom'
                                   ? 'bg-indigo-50 dark:bg-indigo-900/30 border-indigo-500 dark:border-indigo-400 text-indigo-700 dark:text-indigo-300 font-medium'
                                   : 'bg-card dark:bg-surface-dark border-border dark:border-border-dark text-text-secondary dark:text-text-secondary-dark hover:bg-surface dark:hover:bg-surface-dark'
                               }`}
                             >
-                              Custom Hex
+                              Custom Colours
                             </button>
                           </div>
                         </div>
 
-                        {(color.colorType || 'tailwind') === 'tailwind' ? (
+                        {(color.colorType || 'standard') === 'standard' ? (
                           <>
                             <ColorSelector
                               label="Base Color"
                               selectedColor={color.baseColor || 'indigo'}
                               onSelect={(selected) => updateColor(index, 'baseColor', selected)}
                             />
-
-                            <div>
-                              <label className="text-sm font-medium text-text-primary dark:text-text-secondary-dark mb-2 block">Shade</label>
-                              <select
-                                value={color.shade || 600}
-                                onChange={(e) => updateColor(index, 'shade', parseInt(e.target.value))}
-                                className="w-full px-4 py-2.5 rounded-input border border-border dark:border-border-dark bg-card dark:bg-surface-dark text-text-primary dark:text-text-primary-dark focus:outline-none focus:ring-2 focus:ring-2 focus:ring-focus-ring dark:focus:ring-focus-ring-dark focus:border-action dark:focus:border-action-dark"
-                              >
-                                {getTailwindShades().map(shade => (
-                                  <option key={shade} value={shade}>{shade}</option>
-                                ))}
-                              </select>
-                            </div>
-
-                            <ColorSelector
-                              label="Secondary Gradient Color (optional)"
-                              selectedColor={color.secondaryColor}
-                              onSelect={(selected) => updateColor(index, 'secondaryColor', selected)}
-                              showAuto={true}
-                            />
-
-                            {/* Show hex equivalent for standard colors */}
-                            <div>
-                              <label className="text-sm font-medium text-text-primary dark:text-text-secondary-dark mb-2 block">Hex Equivalent</label>
-                              <div className="flex gap-2 items-center">
-                                <input
-                                  type="color"
-                                  value={getTailwindColorHex(color.baseColor || 'indigo', color.shade || 600)}
-                                  readOnly
-                                  className="w-16 h-10 rounded-input border border-border dark:border-border-dark cursor-not-allowed opacity-75"
-                                />
-                                <input
-                                  type="text"
-                                  value={getTailwindColorHex(color.baseColor || 'indigo', color.shade || 600)}
-                                  readOnly
-                                  className="flex-1 px-4 py-2.5 rounded-input border border-border dark:border-border-dark bg-surface dark:bg-surface-dark font-mono text-sm text-text-secondary dark:text-text-secondary-dark"
-                                />
-                              </div>
-                              <p className="text-xs text-text-muted dark:text-text-muted-dark mt-1">This is the hex value of the selected standard color</p>
-                            </div>
+                            <p className="text-xs text-text-muted dark:text-text-muted-dark">Secondary: Auto (complementary)</p>
                           </>
                         ) : (
                           <>
                             <div>
-                              <label className="text-sm font-medium text-text-primary dark:text-text-secondary-dark mb-2 block">Base Color (Hex)</label>
+                              <label className="text-sm font-medium text-text-primary dark:text-text-secondary-dark mb-2 block">Base Color</label>
                               <div className="flex gap-2 items-center">
                                 <input
                                   type="color"
@@ -5084,7 +5113,7 @@ function SettingsView({ settings, setSettings, onBack, onSave, apiCall, showAler
                             </div>
 
                             <div>
-                              <label className="text-sm font-medium text-text-primary dark:text-text-secondary-dark mb-2 block">Secondary Gradient Color (Hex, optional)</label>
+                              <label className="text-sm font-medium text-text-primary dark:text-text-secondary-dark mb-2 block">Secondary Color (optional)</label>
                               <div className="flex gap-2 items-center">
                                 <input
                                   type="color"
@@ -5096,11 +5125,11 @@ function SettingsView({ settings, setSettings, onBack, onSave, apiCall, showAler
                                   type="text"
                                   value={color.hexSecondary || ''}
                                   onChange={(e) => updateColor(index, 'hexSecondary', e.target.value || null)}
-                                  placeholder="Leave blank for auto (same as base)"
+                                  placeholder="Leave blank for auto (complementary)"
                                   className="flex-1 px-4 py-2.5 rounded-input border border-border dark:border-border-dark bg-card dark:bg-surface-dark text-text-primary dark:text-text-primary-dark focus:outline-none focus:ring-2 focus:ring-2 focus:ring-focus-ring dark:focus:ring-focus-ring-dark focus:border-action dark:focus:border-action-dark font-mono text-sm"
                                 />
                               </div>
-                              <p className="text-xs text-text-muted dark:text-text-muted-dark mt-1">Leave blank to use the same color as base</p>
+                              <p className="text-xs text-text-muted dark:text-text-muted-dark mt-1">Leave blank to use auto (complementary) color</p>
                             </div>
                           </>
                         )}
@@ -5108,58 +5137,38 @@ function SettingsView({ settings, setSettings, onBack, onSave, apiCall, showAler
                         {/* Preview of generated gradient */}
                         <div>
                           <label className="text-sm font-medium text-text-primary dark:text-text-secondary-dark mb-2 block">Preview</label>
-                          {color.gradientStyle ? (
-                            <div 
-                              className="w-full h-16 rounded-container border border-border dark:border-border-dark"
-                              style={{ background: color.gradientStyle }}
-                            />
-                          ) : (
-                            <div className={`w-full h-16 rounded-container bg-gradient-to-br ${color.gradient} border border-border dark:border-border-dark`} />
-                          )}
+                          <div 
+                            className="w-full h-16 rounded-container overflow-hidden"
+                            style={{ background: color.gradientStyle || 'linear-gradient(135deg, #4f46e5, #7c3aed)' }}
+                          />
                         </div>
 
                         {/* Collapsible advanced view */}
                         <details className="text-sm">
                           <summary className="cursor-pointer text-text-secondary dark:text-text-muted-dark hover:text-text-primary dark:hover:text-text-primary-dark font-medium mb-2">
-                            Advanced: Generated Classes
+                            Advanced: Generated Styles
                           </summary>
                           <div className="bg-card dark:bg-surface-dark p-3 rounded-container border border-border dark:border-border-dark space-y-2 text-xs font-mono">
-                            {color.gradientStyle ? (
-                              // Hex color styles
-                              <>
-                                <div><span className="text-text-muted dark:text-text-muted-dark">Gradient Style:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.gradientStyle}</span></div>
-                                <div><span className="text-text-muted dark:text-text-muted-dark">Button Style:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.buttonStyle}</span></div>
-                                <div><span className="text-text-muted dark:text-text-muted-dark">Link Style:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.linkStyle}</span></div>
-                                <div><span className="text-text-muted dark:text-text-muted-dark">Text Style:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.textStyle}</span></div>
-                              </>
-                            ) : (
-                              // Tailwind classes
-                              <>
-                                <div><span className="text-text-muted dark:text-text-muted-dark">Gradient:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.gradient || 'null'}</span></div>
-                                <div><span className="text-text-muted dark:text-text-muted-dark">Button:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.button || 'null'}</span></div>
-                                <div><span className="text-text-muted dark:text-text-muted-dark">Link:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.link || 'null'}</span></div>
-                                <div><span className="text-text-muted dark:text-text-muted-dark">Text:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.text || 'null'}</span></div>
-                              </>
-                            )}
+                            <div><span className="text-text-muted dark:text-text-muted-dark">Gradient Style:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.gradientStyle || 'N/A'}</span></div>
+                            <div><span className="text-text-muted dark:text-text-muted-dark">Button Style:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.buttonStyle || 'N/A'}</span></div>
+                            <div><span className="text-text-muted dark:text-text-muted-dark">Link Style:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.linkStyle || 'N/A'}</span></div>
+                            <div><span className="text-text-muted dark:text-text-muted-dark">Text Style:</span> <span className="text-text-primary dark:text-text-primary-dark">{color.textStyle || 'N/A'}</span></div>
                           </div>
                         </details>
                       </div>
                     ) : (
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-4">
-                          {color.gradientStyle ? (
-                            <div 
-                              className="w-12 h-12 rounded-full border-thick border-border dark:border-border-dark"
-                              style={{ background: color.gradientStyle }}
-                            />
-                          ) : (
-                            <div className={`w-12 h-12 rounded-full bg-gradient-to-br ${color.gradient || 'from-indigo-600 to-purple-600'} border-thick border-border dark:border-border-dark`} />
-                          )}
+                          <div 
+                            className="w-12 h-12 rounded-full"
+                            style={{ background: color.gradientStyle || 'linear-gradient(135deg, #4f46e5, #7c3aed)' }}
+                          />
                           <div>
-                            <div className="font-medium text-text-primary dark:text-text-primary-dark">{color.name}</div>
+                            <div className="font-medium text-text-primary dark:text-text-primary-dark">
+                              {color.baseColor ? (color.baseColor.charAt(0).toUpperCase() + color.baseColor.slice(1)) : color.name}
+                            </div>
                             <div className="text-xs text-text-muted dark:text-text-muted-dark">
-                              {color.baseColor || 'indigo'}-{color.shade || 600}
-                              {color.secondaryColor ? ` → ${color.secondaryColor}-${color.shade || 600}` : ' (auto)'}
+                              {color.baseColor ? 'Standard' : 'Custom'} (Secondary: Auto)
                             </div>
                           </div>
                         </div>
@@ -5181,7 +5190,7 @@ function SettingsView({ settings, setSettings, onBack, onSave, apiCall, showAler
         </div>
       </div>
 
-      <div className="hidden lg:flex w-1/2 bg-main dark:bg-main-dark bg-main-texture items-center justify-center p-10">
+      <div className="hidden lg:flex w-1/2 bg-main dark:bg-main-dark items-center justify-center p-10">
         <div className="bg-card dark:bg-card-dark rounded-card p-8 shadow-lg max-w-md w-full border border-border dark:border-border-dark relative z-10 isolate">
           <h3 className="text-lg font-bold text-text-primary dark:text-text-primary-dark mb-4">Preview</h3>
           <div className="space-y-4">
@@ -5190,22 +5199,60 @@ function SettingsView({ settings, setSettings, onBack, onSave, apiCall, showAler
               <div className="font-medium text-text-primary dark:text-text-primary-dark">{localSettings.default_organisation || 'Not set'}</div>
             </div>
             <div>
-              <div className="text-sm text-text-secondary dark:text-text-muted-dark mb-3">Available Colors:</div>
-              <div className="flex flex-wrap gap-2">
-                {localSettings.theme_colors?.map(color => (
-                  <div key={color.name} className="flex items-center gap-2 bg-surface dark:bg-surface-dark/70 p-2 rounded-container border border-border dark:border-border-dark">
-                    {color.gradientStyle ? (
+              <div className="text-sm text-text-secondary dark:text-text-muted-dark mb-3">Color Effects:</div>
+              {(() => {
+                const previewColor = editingColorIndex !== null && localSettings.theme_colors?.[editingColorIndex]
+                  ? localSettings.theme_colors[editingColorIndex]
+                  : localSettings.theme_colors?.[0];
+                
+                return (
+                  <div className="space-y-3">
+                    {/* Text example */}
+                    <div>
+                      <div className="text-xs text-text-muted dark:text-text-muted-dark mb-1">Text</div>
                       <div 
-                        className="w-6 h-6 rounded-full border border-border dark:border-border-dark"
-                        style={{ background: color.gradientStyle }}
+                        className="text-lg font-medium"
+                        style={{ color: previewColor?.textStyle || '#4f46e5' }}
+                      >
+                        Example Text
+                      </div>
+                    </div>
+                    
+                    {/* Link example */}
+                    <div>
+                      <div className="text-xs text-text-muted dark:text-text-muted-dark mb-1">Link</div>
+                      <a 
+                        href="#" 
+                        className="inline-block px-4 py-2 rounded-input border border-border dark:border-border-dark transition-all hover:opacity-80"
+                        style={{ color: previewColor?.linkStyle || '#4f46e5' }}
+                        onClick={(e) => e.preventDefault()}
+                      >
+                        Example Link
+                      </a>
+                    </div>
+                    
+                    {/* Button example */}
+                    <div>
+                      <div className="text-xs text-text-muted dark:text-text-muted-dark mb-1">Button</div>
+                      <button 
+                        className="px-4 py-2 rounded-full font-medium text-white shadow-md transition-transform active:scale-[0.98]"
+                        style={{ backgroundColor: previewColor?.buttonStyle || '#4f46e5' }}
+                      >
+                        Example Button
+                      </button>
+                    </div>
+                    
+                    {/* Gradient background example */}
+                    <div>
+                      <div className="text-xs text-text-muted dark:text-text-muted-dark mb-1">Gradient Background</div>
+                      <div 
+                        className="w-full h-12 rounded-container overflow-hidden"
+                        style={{ background: previewColor?.gradientStyle || 'linear-gradient(135deg, #4f46e5, #7c3aed)' }}
                       />
-                    ) : (
-                      <div className={`w-6 h-6 rounded-full bg-gradient-to-br ${color.gradient || 'from-indigo-600 to-purple-600'} border border-border dark:border-border-dark`} />
-                    )}
-                    <span className="text-xs font-medium text-text-primary dark:text-text-primary-dark">{color.name}</span>
+                    </div>
                   </div>
-                ))}
-              </div>
+                );
+              })()}
             </div>
           </div>
         </div>

@@ -1,0 +1,2 @@
+-- Initial schema migration - no rollback needed
+-- This migration creates the base schema and should not be rolled back

@@ -1,6 +1,6 @@
 {
   "name": "swiish",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Open-source digital business card platform with QR codes and PWA support",
   "private": false,
   "repository": {
@@ -22,10 +22,12 @@
     "@dnd-kit/sortable": "^10.0.0",
     "ajv-keywords": "^5.1.0",
     "bcrypt": "^5.1.1",
-    "country-flag-icons": "^1.5.7",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
+    "country-flag-icons": "^1.5.7",
     "csurf": "^1.11.0",
+    "db-migrate": "^0.11.14",
+    "db-migrate-sqlite3": "^1.0.2",
     "dompurify": "^3.3.1",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
@@ -50,6 +52,7 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "serve": "node server.js",
+    "migrate": "db-migrate up",
     "watch:build": "nodemon --watch src --ext js,jsx,css --exec \"npm run build\" --ignore build",
     "watch:server": "nodemon --watch server.js --exec \"node server.js\" --ignore build --ignore src",
     "dev": "concurrently \"npm run watch:build\" \"npm run watch:server\" --names \"BUILD,SERVER\" --prefix-colors \"cyan,yellow\""

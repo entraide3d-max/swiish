@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2025-12-28
+
+### Breaking Changes
+- **Color system migration**: All existing theme colors with Tailwind gradients will be automatically converted to hex on load. Any custom Tailwind classes (gradient, button, link, text) stored in the database will be replaced with inline styles. Users upgrading may need to re-select colors if they had custom shades other than 600.
+
+### Added
+- Database migration system using `db-migrate` for schema management
+- `database.json` configuration file for migration settings
+- `migrations/` directory with initial schema migration
+- `npm run migrate` script for manual migration execution
+- Automatic migration execution on server startup
+
+### Fixed
+- Sand texture now only appears on main background, not on Preview box in settings page desktop mode
+
+### Changed
+- Database schema initialization refactored from hardcoded `db.serialize()` blocks to migration-based system
+- Schema creation now uses proper migration files instead of inline SQL in `server.js`
+- Data migration (short code backfill) separated from schema initialization
+- Server now runs migrations automatically before starting, ensuring database is up-to-date
+- Swiish logo positioning aligned across admin/people, settings, and card edit pages - now uses fixed positioning to align vertically with version badge
+- Login page improvements: removed horizontal line above logo, adjusted logo margins to match box spacing, changed heading from "Admin Access" to "Login"
+- **Color system completely refactored to hex-only architecture**: Removed all Tailwind class generation complexity, simplified color data structure to use inline styles exclusively. Both "Standard Colors" and "Custom Colours" modes now use hex values internally. Removed shade selector, always auto-generate complementary secondary colors for standard colors, allow manual secondary color selection for custom colours. UI simplified with cleaner labels and better preview examples showing text, links, buttons, and gradient effects.
+
+### Technical
+- All CREATE TABLE and CREATE INDEX statements now use `IF NOT EXISTS` for safe, idempotent migrations
+- Migration system is compatible with Docker deployments and persistent volumes
+- Existing databases are safely migrated without data loss
+
 ## [0.1.2] - 2025-12-27
 
 ### Fixed

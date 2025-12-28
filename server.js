@@ -17,6 +17,7 @@ const QRCode = require('qrcode');
 const bcrypt = require('bcrypt');
 const nodemailer = require('nodemailer');
 const util = require('util');
+const { execSync } = require('child_process');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -143,116 +144,11 @@ const getDefaultThemeColors = () => [
   { name: "slate", gradient: "from-slate-700 to-slate-900", button: "bg-slate-800 hover:bg-slate-900", link: "text-slate-700 bg-slate-100 border-slate-200 hover:bg-slate-200", text: "text-slate-800" }
 ];
 
-// Initialize database schema
-db.serialize(() => {
-  // Create new multi-tenant tables
-  db.run(`
-    CREATE TABLE IF NOT EXISTS organisations (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      slug TEXT UNIQUE,
-      subscription_tier TEXT DEFAULT 'individual',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      organisation_id TEXT,
-      role TEXT DEFAULT 'member',
-      email_verified INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (organisation_id) REFERENCES organisations(id) ON DELETE SET NULL
-    )
-  `);
-  
-  db.run(`
-    CREATE TABLE IF NOT EXISTS organisation_settings (
-      organisation_id TEXT NOT NULL,
-      key TEXT NOT NULL,
-      value TEXT,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (organisation_id, key),
-      FOREIGN KEY (organisation_id) REFERENCES organisations(id) ON DELETE CASCADE
-    )
-  `);
-  
-  db.run(`
-    CREATE TABLE IF NOT EXISTS user_settings (
-      user_id TEXT NOT NULL,
-      key TEXT NOT NULL,
-      value TEXT,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (user_id, key),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-  
-  db.run(`
-    CREATE TABLE IF NOT EXISTS invitations (
-      id TEXT PRIMARY KEY,
-      organisation_id TEXT NOT NULL,
-      email TEXT NOT NULL,
-      token TEXT UNIQUE NOT NULL,
-      role TEXT DEFAULT 'member',
-      invited_by TEXT NOT NULL,
-      expires_at DATETIME NOT NULL,
-      accepted_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (organisation_id) REFERENCES organisations(id) ON DELETE CASCADE,
-      FOREIGN KEY (invited_by) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-  
-  db.run(`
-    CREATE TABLE IF NOT EXISTS password_reset_tokens (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      token TEXT UNIQUE NOT NULL,
-      expires_at DATETIME NOT NULL,
-      used_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-  
-  db.run(`
-    CREATE TABLE IF NOT EXISTS email_verification_tokens (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      token TEXT UNIQUE NOT NULL,
-      expires_at DATETIME NOT NULL,
-      verified_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-  
-  // Create cards table (fresh install only - no migration)
-  db.run(`
-    CREATE TABLE IF NOT EXISTS cards (
-      slug TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      short_code TEXT NOT NULL,
-      data TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (slug, user_id),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-  
-  // Create unique index on short_code
-  db.run(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_short_code ON cards(short_code)
-  `);
-  
-  // Migration: Backfill short codes for existing cards that don't have them
+// Database migrations are handled by db-migrate (see migrations/ directory)
+// Run migrations before starting the server (see startup code below)
+
+// Data migration: Backfill short codes for existing cards that don't have them
+function backfillShortCodes() {
   db.all("SELECT slug, user_id FROM cards WHERE short_code IS NULL OR short_code = ''", [], (err, rows) => {
     if (err) {
       console.error('Error checking for cards without short codes:', err);
@@ -284,7 +180,7 @@ db.serialize(() => {
       });
     }
   });
-});
+}
 
 // --- 3. SETUP UPLOADS (Multer) ---
 const { randomUUID } = require('crypto');
@@ -2996,6 +2892,27 @@ app.get('*', async (req, res, next) => {
     next(err);
   }
 });
+
+// Run database migrations before starting the server
+function runMigrations() {
+  try {
+    console.log('Running database migrations...');
+    execSync('npx db-migrate up', { 
+      stdio: 'inherit',
+      cwd: __dirname 
+    });
+    console.log('Database migrations completed successfully');
+    
+    // Run data migration after schema migrations
+    backfillShortCodes();
+  } catch (error) {
+    console.error('Migration failed:', error.message);
+    process.exit(1);
+  }
+}
+
+// Run migrations and start server
+runMigrations();
 
 app.listen(PORT, () => {
   // Startup logs are always useful, keep them
