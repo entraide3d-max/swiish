@@ -3152,7 +3152,7 @@ END:VCARD`;
         </div>
       )}
 
-      <div className="h-44 w-full relative bg-surface dark:bg-surface-dark">
+      <div className={`h-44 w-full relative bg-surface dark:bg-surface-dark ${showQR ? 'opacity-0' : 'opacity-100'}`}>
         {images.banner ? (
           <img src={images.banner} className="w-full h-full object-cover" alt="banner" />
         ) : (

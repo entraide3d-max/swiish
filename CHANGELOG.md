@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- QR code share modal redesigned to full-screen overlay for better visibility
+- QR code now displays at 90% width at the top of the screen (previously constrained to small modal)
+- Share controls (Link only/Full details toggle and Close button) moved to bottom of screen
+- Replaced "Share Card" heading with card name, company, and short URL display
+- Removed backdrop blur from QR overlay for cleaner appearance
+- Desktop overlay uses 22px border radius (2px smaller than card container) to prevent background bleed-through
+- Banner/header opacity set to 0% when QR overlay is active to prevent underlying card background from showing through rounded corners
+
 ## [0.2.1] - 2025-12-28
 
 ### Fixed
