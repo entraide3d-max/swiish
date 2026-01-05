@@ -403,6 +403,7 @@ function Modal({ isOpen, onClose, type = 'info', title, message, onConfirm, conf
 
 function VersionBadge() {
   const [isOutdated, setIsOutdated] = useState(false);
+  const [isAhead, setIsAhead] = useState(false);
   const [isChecking, setIsChecking] = useState(true);
 
   useEffect(() => {
@@ -420,22 +421,86 @@ function VersionBadge() {
           const latestVersion = data.tag_name?.replace(/^v/, '') || data.tag_name; // Remove 'v' prefix if present
           const currentVersion = APP_VERSION;
           
-          // Simple version comparison (works for semantic versions like 0.1.0, 0.2.0, etc.)
+          // SemVer-compliant version comparison
+          // Follows SemVer precedence rules: pre-release versions have lower precedence than stable versions
           const compareVersions = (v1, v2) => {
-            const parts1 = v1.split('.').map(Number);
-            const parts2 = v2.split('.').map(Number);
-            
-            for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
-              const part1 = parts1[i] || 0;
-              const part2 = parts2[i] || 0;
+            // Parse versions into base version and pre-release identifier
+            const parseVersion = (version) => {
+              const dashIndex = version.indexOf('-');
+              if (dashIndex === -1) {
+                return {
+                  base: version,
+                  prerelease: null
+                };
+              }
+              return {
+                base: version.substring(0, dashIndex),
+                prerelease: version.substring(dashIndex + 1)
+              };
+            };
+
+            const parsed1 = parseVersion(v1);
+            const parsed2 = parseVersion(v2);
+
+            // Compare base versions numerically
+            const base1 = parsed1.base.split('.').map(Number);
+            const base2 = parsed2.base.split('.').map(Number);
+
+            for (let i = 0; i < Math.max(base1.length, base2.length); i++) {
+              const part1 = base1[i] || 0;
+              const part2 = base2[i] || 0;
               if (part1 < part2) return -1;
               if (part1 > part2) return 1;
             }
-            return 0;
+
+            // Base versions are equal, now check pre-release identifiers
+            // Rule: A version without a pre-release identifier has higher precedence
+            if (parsed1.prerelease === null && parsed2.prerelease === null) {
+              return 0; // Both are stable, equal
+            }
+            if (parsed1.prerelease === null) {
+              return 1; // v1 is stable, v2 is pre-release, v1 > v2
+            }
+            if (parsed2.prerelease === null) {
+              return -1; // v1 is pre-release, v2 is stable, v1 < v2
+            }
+
+            // Both have pre-release identifiers, compare lexicographically
+            const prerelease1 = parsed1.prerelease.split('.');
+            const prerelease2 = parsed2.prerelease.split('.');
+
+            for (let i = 0; i < Math.max(prerelease1.length, prerelease2.length); i++) {
+              const part1 = prerelease1[i];
+              const part2 = prerelease2[i];
+
+              if (part1 === undefined) return -1; // v1 has fewer parts, v1 < v2
+              if (part2 === undefined) return 1; // v2 has fewer parts, v1 > v2
+
+              // Try numeric comparison first, fall back to string comparison
+              const num1 = Number(part1);
+              const num2 = Number(part2);
+
+              if (!isNaN(num1) && !isNaN(num2)) {
+                // Both are numeric
+                if (num1 < num2) return -1;
+                if (num1 > num2) return 1;
+              } else {
+                // At least one is non-numeric, compare as strings
+                if (part1 < part2) return -1;
+                if (part1 > part2) return 1;
+              }
+            }
+
+            return 0; // Pre-release identifiers are equal
           };
           
-          if (latestVersion && compareVersions(currentVersion, latestVersion) < 0) {
-            setIsOutdated(true);
+          if (latestVersion) {
+            const comparison = compareVersions(currentVersion, latestVersion);
+            if (comparison < 0) {
+              setIsOutdated(true);
+            } else if (comparison > 0) {
+              setIsAhead(true);
+            }
           }
         }
       } catch (error) {
@@ -458,9 +523,11 @@ function VersionBadge() {
         className={`text-xs font-medium transition-all bg-card dark:bg-card-dark border-2 border-border dark:border-border-dark px-2 py-1 rounded shadow-sm hover:shadow-md ${
           isOutdated 
             ? 'text-error-text dark:text-error-text-dark hover:bg-error-bg dark:hover:bg-error-bg-dark hover:border-error-border dark:hover:border-error-border-dark' 
+            : isAhead
+            ? 'text-info-text dark:text-info-text-dark hover:bg-info-bg dark:hover:bg-info-bg-dark hover:border-info-border dark:hover:border-info-border-dark'
             : 'text-text-primary dark:text-text-primary-dark hover:text-action dark:hover:text-action-dark hover:border-success-border dark:hover:border-success-border-dark'
         }`}
-        title={isOutdated ? "Update available on GitHub" : "View on GitHub"}
+        title={isOutdated ? "Update available on GitHub" : isAhead ? "Ahead of latest release on GitHub" : "View on GitHub"}
       >
         v{APP_VERSION}
       </a>
@@ -1579,7 +1646,7 @@ const [settings, setSettings] = useState({
                 {isSettingUp ? 'Setting up...' : 'Complete Setup'}
               </button>
             </form>
-            <div className="text-center mt-auto pt-4 pb-4 border-t border-border-subtle dark:border-border-dark group relative z-10">
+            <div className="text-center mt-auto pt-8 pb-0 group relative z-10" style={{ boxSizing: 'content-box' }}>
               <div className="flex justify-center">
                 <img src="/graphics/Swiish_Logo.svg" alt="Swiish" className="h-4 w-auto dark:hidden swiish-logo" />
                 <img src="/graphics/Swiish_Logo_DarkBg.svg" alt="Swiish" className="h-4 w-auto hidden dark:block swiish-logo" />
@@ -2144,7 +2211,7 @@ const [settings, setSettings] = useState({
                   {isSettingUp ? 'Setting up...' : 'Complete Setup'}
                 </button>
               </form>
-              <div className="text-center mt-auto pt-4 pb-4 border-t border-border-subtle dark:border-border-dark group relative z-10">
+              <div className="text-center mt-auto pt-8 pb-0 group relative z-10" style={{ boxSizing: 'content-box' }}>
                 <div className="flex justify-center">
                   <img src="/graphics/Swiish_Logo.svg" alt="Swiish" className="h-4 w-auto dark:hidden swiish-logo" />
                   <img src="/graphics/Swiish_Logo_DarkBg.svg" alt="Swiish" className="h-4 w-auto hidden dark:block swiish-logo" />
@@ -2740,12 +2807,6 @@ function PublicCardRoute({ view, isPublicLoading, error, data, settings, darkMod
             showAlert={showAlert}
           />
         </div>
-        <div className="bg-card dark:bg-card-dark pb-4 text-center space-y-2 mt-auto relative z-10">
-            <div className="flex justify-center">
-              <img src="/graphics/Swiish_Logo.svg" alt="Swiish" className="h-4 w-auto dark:hidden swiish-logo" />
-              <img src="/graphics/Swiish_Logo_DarkBg.svg" alt="Swiish" className="h-4 w-auto hidden dark:block swiish-logo" />
-            </div>
-        </div>
       </div>
       </div>
     );
@@ -3053,86 +3114,115 @@ END:VCARD`;
 
   const currentQrDataUrl = qrMode === 'simple' ? qrSimpleDataUrl : qrRichDataUrl;
 
-  return (
-    <div className={`flex flex-col h-full bg-card dark:bg-card-dark`}>
-      {showQR && (
-        <div className="fixed inset-0 bg-black/60 dark:bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowQR(false)}>
-          <div className="bg-card dark:bg-card-dark rounded-card p-6 max-w-[320px] w-full text-center space-y-4" onClick={e => e.stopPropagation()}>
-            <h2 className="text-xl font-bold text-text-primary dark:text-text-primary-dark mb-1">Share Card</h2>
-            
-            {/* Shared width wrapper for toggle + QR + button */}
-            <div className="w-full max-w-[260px] mx-auto space-y-3">
-              {/* Toggle - full width */}
-              <div className="w-full">
-                <div className="flex w-full items-center justify-center gap-1 bg-surface dark:bg-surface-dark rounded-full p-1 text-[11px]">
-                  <button
-                    type="button"
-                    onClick={() => setQrMode('simple')}
-                    className={`flex-1 px-2.5 py-1 rounded-full font-medium transition-colors ${
-                      qrMode === 'simple'
-                        ? 'bg-card dark:bg-main-dark text-text-primary dark:text-text-primary-dark shadow-sm'
-                        : 'text-text-muted dark:text-text-secondary-dark'
-                    }`}
-                  >
-                    Link only
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setQrMode('rich')}
-                    className={`flex-1 px-2.5 py-1 rounded-full font-medium transition-colors ${
-                      qrMode === 'rich'
-                        ? 'bg-card dark:bg-main-dark text-text-primary dark:text-text-primary-dark shadow-sm'
-                        : 'text-text-muted dark:text-text-secondary-dark'
-                    }`}
-                  >
-                    Full details
-                  </button>
-                </div>
-              </div>
+  // Extract short code for display
+  const pathParts = typeof window !== 'undefined' ? window.location.pathname.substring(1).split('/').filter(p => p) : [];
+  const isShortCodeRoute = pathParts.length === 1 && /^[a-zA-Z0-9]{7}$/.test(pathParts[0]);
+  const shortCode = data._shortCode || (isShortCodeRoute ? pathParts[0] : null);
+  const shortUrl = shortCode ? `${window.location.origin}/${shortCode}` : '';
+  const cardName = `${personal.firstName || ''} ${personal.lastName || ''}`.trim();
+  const company = personal.company || '';
 
-              {/* QR container - full width */}
-              <div className="w-full">
-                <div className="w-full bg-input-bg dark:bg-input-bg-dark p-3 rounded-input border-thick border-border-subtle dark:border-border-dark flex items-center justify-center">
-                  {currentQrDataUrl ? (
-                    <img src={currentQrDataUrl} className="w-40 h-40 max-w-full max-h-full mix-blend-multiply dark:mix-blend-normal" alt="qr" />
-                  ) : qrMode === 'rich' && offlineQrPayload ? (
-                    <div className="w-40 h-40 flex flex-col items-center justify-center text-text-muted-subtle dark:text-text-secondary-dark text-xs space-y-1">
-                      <span>{isOnline ? 'Saved details' : 'Offline mode'}</span>
-                      <span className="text-[10px] opacity-80 px-1">
-                        This code includes your saved Swiish details and a link to your card when scanned with an online device.
-                      </span>
-                    </div>
-                  ) : (!isOnline && qrMode === 'simple' && !qrSimpleDataUrl) ? (
-                    <div className="w-40 h-40 flex flex-col items-center justify-center text-text-muted-subtle dark:text-text-secondary-dark text-xs text-center space-y-1">
-                      <span>Link-only QR is available when you&apos;re online.</span>
-                      <span className="text-[10px] opacity-80 px-1">
-                        Switch to \"Full details\" to use your saved offline code.
-                      </span>
-                    </div>
-                  ) : (
-                    <div className="w-40 h-40 flex items-center justify-center text-text-muted-subtle dark:text-text-muted-dark text-xs text-center">
-                      {isOnline
-                        ? (qrError || 'Loading your QR code...')
-                        : 'Connect once to generate and save your QR code for offline use.'}
-                    </div>
-                  )}
+  // If QR is shown, render only the QR view (full screen, independent of card)
+  if (showQR) {
+    return (
+      <div className="fixed inset-0 bg-card dark:bg-card-dark flex flex-col text-center overflow-hidden lg:rounded-[22px] z-50 min-h-screen lg:min-h-0 lg:h-auto">
+        {/* QR Code section at top */}
+        <div className="flex flex-col items-center justify-start pt-8 px-4 pb-8 lg:pt-8 lg:flex-shrink-0">
+          <div className="w-[90%]">
+            <div className="w-full bg-input-bg dark:bg-input-bg-dark p-3 rounded-input border-thick border-border-subtle dark:border-border-dark flex items-center justify-center overflow-hidden">
+              {currentQrDataUrl ? (
+                <img src={currentQrDataUrl} className="w-full aspect-square mix-blend-multiply dark:mix-blend-normal" alt="QR code" />
+              ) : qrMode === 'rich' && offlineQrPayload ? (
+                <div className="w-full aspect-square flex flex-col items-center justify-center text-text-muted-subtle dark:text-text-secondary-dark text-xs space-y-1">
+                  <span>{isOnline ? 'Saved details' : 'Offline mode'}</span>
+                  <span className="text-[10px] opacity-80 px-1">
+                    This code includes your saved Swiish details and a link to your card when scanned with an online device.
+                  </span>
                 </div>
-              </div>
-
-              {/* Offline note */}
-              {!isOnline && offlineQrPayload && (
-                <p className="text-xs text-text-muted dark:text-text-muted-dark">
-                  Using last saved QR details (offline). The code includes your contact info and a link to your Swiish card.
-                </p>
+              ) : (!isOnline && qrMode === 'simple' && !qrSimpleDataUrl) ? (
+                <div className="w-full aspect-square flex flex-col items-center justify-center text-text-muted-subtle dark:text-text-secondary-dark text-xs text-center space-y-1">
+                  <span>Link-only QR is available when you&apos;re online.</span>
+                  <span className="text-[10px] opacity-80 px-1">
+                    Switch to \"Full details\" to use your saved offline code.
+                  </span>
+                </div>
+              ) : (
+                <div className="w-full aspect-square flex items-center justify-center text-text-muted-subtle dark:text-text-muted-dark text-xs text-center">
+                  {isOnline
+                    ? (qrError || 'Loading your QR code...')
+                    : 'Connect once to generate and save your QR code for offline use.'}
+                </div>
               )}
+            </div>
+          </div>
 
-              {/* Close button - full width */}
-              <button onClick={() => setShowQR(false)} className="w-full py-3 bg-surface dark:bg-surface-dark text-text-primary dark:text-text-primary-dark font-bold rounded-input hover:bg-surface dark:hover:bg-surface-dark text-sm transition-colors">Close</button>
+          {/* Card information display */}
+          <div className="mt-6 space-y-2 px-4">
+            {cardName && (
+              <h2 className="text-xl font-bold text-text-primary dark:text-text-primary-dark">{cardName}</h2>
+            )}
+            {company && (
+              <div className="text-text-muted dark:text-text-muted-dark text-sm">{company}</div>
+            )}
+            {shortUrl && (
+              <div className="text-text-muted-subtle dark:text-text-secondary-dark text-xs font-mono break-all">{shortUrl}</div>
+            )}
+          </div>
+
+          {/* Offline note */}
+          {!isOnline && offlineQrPayload && (
+            <p className="text-xs text-text-muted dark:text-text-muted-dark mt-4 px-4">
+              Using last saved QR details (offline). The code includes your contact info and a link to your Swiish card.
+            </p>
+          )}
+        </div>
+
+        {/* Controls and logo section at bottom */}
+        <div className="mt-auto pb-4 px-4 space-y-3 lg:pb-4 lg:pt-4 lg:flex-shrink-0">
+          {/* Toggle buttons */}
+          <div className="flex w-full items-center justify-center gap-1 bg-surface dark:bg-surface-dark rounded-full p-1 text-[11px] max-w-md mx-auto">
+            <button
+              type="button"
+              onClick={() => setQrMode('simple')}
+              className={`flex-1 px-2.5 py-1 rounded-full font-medium transition-colors ${
+                qrMode === 'simple'
+                  ? 'bg-card dark:bg-main-dark text-text-primary dark:text-text-primary-dark shadow-sm'
+                  : 'text-text-muted dark:text-text-secondary-dark'
+              }`}
+            >
+              Link only
+            </button>
+            <button
+              type="button"
+              onClick={() => setQrMode('rich')}
+              className={`flex-1 px-2.5 py-1 rounded-full font-medium transition-colors ${
+                qrMode === 'rich'
+                  ? 'bg-card dark:bg-main-dark text-text-primary dark:text-text-primary-dark shadow-sm'
+                  : 'text-text-muted dark:text-text-secondary-dark'
+              }`}
+            >
+              Full details
+            </button>
+          </div>
+
+          {/* Close button */}
+          <button onClick={() => setShowQR(false)} className="w-full max-w-md mx-auto py-3 bg-surface dark:bg-surface-dark text-text-primary dark:text-text-primary-dark font-bold rounded-input hover:bg-surface dark:hover:bg-surface-dark text-sm transition-colors">Close</button>
+
+          {/* Swiish logo */}
+          <div className="bg-card dark:bg-card-dark text-center space-y-2 mt-[24px] mb-[12px]">
+            <div className="flex justify-center py-4">
+              <img src="/graphics/Swiish_Logo.svg" alt="Swiish" className="h-4 w-auto dark:hidden swiish-logo" />
+              <img src="/graphics/Swiish_Logo_DarkBg.svg" alt="Swiish" className="h-4 w-auto hidden dark:block swiish-logo" />
             </div>
           </div>
         </div>
-      )}
+      </div>
+    );
+  }
 
+  // Otherwise, render the normal card view
+  return (
+    <div className={`flex flex-col h-full bg-card dark:bg-card-dark`}>
       <div className="h-44 w-full relative bg-surface dark:bg-surface-dark">
         {images.banner ? (
           <img src={images.banner} className="w-full h-full object-cover" alt="banner" />
@@ -3230,8 +3320,8 @@ END:VCARD`;
         </div>
       </div>
 
-      <div className="px-6 pb-12 -mt-16 relative flex-1 flex flex-col">
-        <div className="w-32 h-32 rounded-full border-avatar border-white dark:border-card-dark shadow-xl overflow-hidden bg-card dark:bg-card-dark relative mb-4">
+      <div className="px-6 pb-6 -mt-16 relative flex-1 flex flex-col min-h-0">
+        <div className="w-32 h-32 min-h-[8rem] flex-shrink-0 rounded-full border-avatar border-white dark:border-card-dark shadow-xl overflow-hidden bg-card dark:bg-card-dark relative mb-4">
           {images.avatar ? <img src={images.avatar} className="w-full h-full object-cover" alt="avatar" /> : <div className="w-full h-full bg-surface dark:bg-surface-dark flex items-center justify-center text-text-muted-subtle dark:text-text-muted-dark"><User className="w-12 h-12" /></div>}
         </div>
 
@@ -3484,6 +3574,14 @@ END:VCARD`;
            <SocialIcon url={social.twitter} icon={Twitter} label="X" themeColor={themeColor} />
            <SocialIcon url={social.instagram} icon={Instagram} label="Insta" themeColor={themeColor} />
            <SocialIcon url={social.github} icon={Github} label="Git" themeColor={themeColor} />
+        </div>
+
+        {/* Swiish logo */}
+        <div className="bg-card dark:bg-card-dark pb-4 text-center space-y-2 mt-auto lg:pb-4">
+          <div className="flex justify-center">
+            <img src="/graphics/Swiish_Logo.svg" alt="Swiish" className="h-4 w-auto dark:hidden swiish-logo" />
+            <img src="/graphics/Swiish_Logo_DarkBg.svg" alt="Swiish" className="h-4 w-auto hidden dark:block swiish-logo" />
+          </div>
         </div>
       </div>
     </div>

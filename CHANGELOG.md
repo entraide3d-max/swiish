@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-01-05
+
+### Fixed
+- Added graceful shutdown handler to properly close database connection on server shutdown, preventing file lock issues on Windows when deleting cards.db
+- Fixed profile picture not displaying in card preview when editing - avatar container was collapsing due to flex layout, added `min-h-32 flex-shrink-0` to prevent height collapse
+
+### Changed
+- Version badge now shows blue border when code is ahead of latest GitHub release (instead of red)
+- Version comparison now follows SemVer precedence rules, properly handling pre-release versions (e.g., `0.2.2-dev` vs `0.2.1`)
+- QR code share view completely redesigned with full-screen layout for better visibility
+- QR code now displays at 90% width at the top of the screen (previously constrained to small modal)
+- Share controls (Link only/Full details toggle and Close button) moved to bottom of screen
+- Replaced "Share Card" heading with card name, company, and short URL display
+- QR view now uses conditional rendering instead of overlay - completely replaces card view when active (fixes mobile scrolling issues and background bleed-through)
+- Removed backdrop blur from QR view for cleaner appearance
+- Desktop QR view uses minimum height container instead of full screen for better layout
+- Logo positioning fixed in both QR and card views to consistently appear at bottom of screen
+- Desktop spacing optimized: QR/details at top, controls/logo at bottom with minimal padding between
+- Setup page footer styling updated: removed border, increased top padding, removed bottom padding
+
 ## [0.2.2] - 2026-01-03
 
 ### Security
