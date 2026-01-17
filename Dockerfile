@@ -13,9 +13,10 @@ RUN npm install
 
 COPY public/ public/
 COPY src/ src/
+COPY .git/ .git/
 
 # Create version.json with the branch info (using the script for reliability)
-RUN GIT_BRANCH=${GIT_BRANCH} node scripts/capture-git-info.js
+RUN node scripts/capture-git-info.js && rm -rf .git
 
 RUN npm run build
 
