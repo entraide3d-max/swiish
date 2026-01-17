@@ -12,6 +12,8 @@ const path = require('path');
 const outputPath = path.join(__dirname, '..', 'src', 'active-branch.json');
 
 function getGitBranch() {
+  console.log('Attempting to detect Git branch...');
+  
   // 1. Try to get the branch name from git first (if .git folder is present)
   try {
     const branch = execSync('git rev-parse --abbrev-ref HEAD', {
@@ -19,19 +21,23 @@ function getGitBranch() {
       stdio: ['pipe', 'pipe', 'pipe']
     }).trim();
     
+    console.log(`Git command returned: "${branch}"`);
+    
     // If we got a valid branch (not HEAD), return it
     if (branch && branch !== 'HEAD') {
       return branch;
     }
   } catch (error) {
-    // Git failed or not a repo, continue to fallback
+    console.log('Git detection failed (is git installed and is this a repo?)');
   }
 
   // 2. Fallback to environment variable (useful for CI/Docker where .git might be missing)
   if (process.env.GIT_BRANCH) {
+    console.log(`Using GIT_BRANCH env var: "${process.env.GIT_BRANCH}"`);
     return process.env.GIT_BRANCH;
   }
 
+  console.log('No branch detected.');
   return null;
 }
 

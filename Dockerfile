@@ -2,6 +2,9 @@
 FROM node:18-alpine as build
 WORKDIR /app
 
+# Install git to allow branch detection
+RUN apk add --no-cache git
+
 COPY package*.json ./
 COPY tailwind.config.js ./
 COPY postcss.config.js ./
