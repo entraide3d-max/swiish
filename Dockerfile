@@ -21,6 +21,7 @@ RUN npm run build
 FROM node:18-alpine
 WORKDIR /app
 COPY --from=build /app/build ./build
+COPY --from=build /app/src/active-branch.json ./active-branch.json
 COPY package*.json ./
 RUN npm install --production
 COPY server.js .
