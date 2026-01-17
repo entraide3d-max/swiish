@@ -7,7 +7,7 @@ build/
 dist/
 
 # Generated files
-src/version.json
+src/active-branch.json
 
 # Environment files
 .env

@@ -2,9 +2,6 @@
 FROM node:18-alpine as build
 WORKDIR /app
 
-# Accept git branch as build argument (pass with --build-arg GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD))
-ARG GIT_BRANCH=main
-
 COPY package*.json ./
 COPY tailwind.config.js ./
 COPY postcss.config.js ./

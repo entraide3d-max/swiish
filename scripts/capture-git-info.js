@@ -9,25 +9,30 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const outputPath = path.join(__dirname, '..', 'src', 'version.json');
+const outputPath = path.join(__dirname, '..', 'src', 'active-branch.json');
 
 function getGitBranch() {
-  // Check if branch is provided via environment variable (useful for Docker/CI)
-  if (process.env.GIT_BRANCH) {
-    return process.env.GIT_BRANCH;
-  }
-
+  // 1. Try to get the branch name from git first (if .git folder is present)
   try {
-    // Try to get the branch name from git
     const branch = execSync('git rev-parse --abbrev-ref HEAD', {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe']
     }).trim();
-    return branch;
+    
+    // If we got a valid branch (not HEAD), return it
+    if (branch && branch !== 'HEAD') {
+      return branch;
+    }
   } catch (error) {
-    // Git not available or not a git repo, return null
-    return null;
+    // Git failed or not a repo, continue to fallback
   }
+
+  // 2. Fallback to environment variable (useful for CI/Docker where .git might be missing)
+  if (process.env.GIT_BRANCH) {
+    return process.env.GIT_BRANCH;
+  }
+
+  return null;
 }
 
 function main() {
