@@ -13,10 +13,10 @@ RUN npm install
 
 COPY public/ public/
 COPY src/ src/
-COPY .git/ .git/
+#COPY .git/ .git/
 
 # Configure git to trust the directory (fixes dubious ownership in Docker)
-RUN git config --global --add safe.directory /app
+#RUN git config --global --add safe.directory /app
 
 # Build the app (this triggers prebuild which runs capture-git-info.js)
 RUN npm run build && rm -rf .git
